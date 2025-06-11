@@ -45,6 +45,22 @@ enum PlaybackMode: String, CaseIterable, Identifiable {
   var id: String { self.rawValue }
 }
 
+enum PlaybackType: String, CaseIterable, Identifiable {
+  case clips = "Clips"
+  case speed = "Speed"
+  var id: String { self.rawValue }
+}
+
+enum SpeedOption: Double, CaseIterable, Identifiable {
+  case x2 = 2.0
+  case x4 = 4.0
+  case x8 = 8.0
+  case x16 = 16.0
+
+  var id: Double { self.rawValue }
+  var displayName: String { "x\(Int(self.rawValue))" }
+}
+
 enum SortOption: String, CaseIterable, Identifiable {
   case name = "Name"
   case dateAdded = "Date Added"
@@ -142,6 +158,8 @@ struct ContentView: View {
   @State private var keepHotkey: String = "k"
   @State private var isMuted: Bool = true
   @State private var playbackMode: PlaybackMode = .folderView
+  @State private var playbackType: PlaybackType = .clips
+  @State private var speedOption: SpeedOption = .x2
 
   // MARK: — Selections
   @State private var batchSelection: [Bool] = []
@@ -266,19 +284,41 @@ struct ContentView: View {
 
       HStack(spacing: 6) {
         HStack(spacing: 2) {
-          Text("Clips:").frame(width: 40, alignment: .leading)
-          Stepper(value: $tempNumberOfClips, in: 1...10) {
-            Text("\(tempNumberOfClips)")
+          Text("Type:").frame(width: 40, alignment: .leading)
+          Picker("", selection: $playbackType) {
+            ForEach(PlaybackType.allCases) { type in
+              Text(type.rawValue).tag(type)
+            }
           }
-          .frame(width: 60)
+          .frame(width: 80)
         }
 
-        HStack(spacing: 2) {
-          Text("Length:").frame(width: 50, alignment: .leading)
-          Stepper(value: $tempClipLength, in: 1...10) {
-            Text("\(tempClipLength)s")
+        if playbackType == .clips {
+          HStack(spacing: 2) {
+            Text("Clips:").frame(width: 40, alignment: .leading)
+            Stepper(value: $tempNumberOfClips, in: 1...10) {
+              Text("\(tempNumberOfClips)")
+            }
+            .frame(width: 60)
           }
-          .frame(width: 60)
+
+          HStack(spacing: 2) {
+            Text("Length:").frame(width: 50, alignment: .leading)
+            Stepper(value: $tempClipLength, in: 1...10) {
+              Text("\(tempClipLength)s")
+            }
+            .frame(width: 60)
+          }
+        } else {
+          HStack(spacing: 2) {
+            Text("Speed:").frame(width: 40, alignment: .leading)
+            Picker("", selection: $speedOption) {
+              ForEach(SpeedOption.allCases) { speed in
+                Text(speed.displayName).tag(speed)
+              }
+            }
+            .frame(width: 80)
+          }
         }
 
         HStack(spacing: 2) {
@@ -356,7 +396,14 @@ struct ContentView: View {
       Spacer()
 
       Picker("Mode:", selection: $playbackMode) {
-        ForEach(PlaybackMode.allCases) { mode in
+        ForEach(
+          PlaybackMode.allCases.filter { mode in
+            if playbackType == .speed {
+              return mode != .sideBySide
+            }
+            return true
+          }
+        ) { mode in
           Text(mode.rawValue).tag(mode)
         }
       }
