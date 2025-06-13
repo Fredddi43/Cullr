@@ -491,44 +491,83 @@ struct ContentView: View {
           LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 8)], spacing: 8) {
             ForEach(videoURLs, id: \.self) { url in
               VStack(spacing: 4) {
-                FolderHoverLoopPreview(
-                  url: url,
-                  isMuted: isMuted,
-                  numberOfClips: numberOfClips,
-                  clipLength: clipLength,
-                  playbackType: playbackType,
-                  speedOption: speedOption
-                )
-                .frame(width: 220, height: 124)
-                .cornerRadius(8)
-                .overlay(
-                  RoundedRectangle(cornerRadius: 8)
-                    .stroke(
-                      selectedURLs.contains(url) ? Color.accentColor : Color.clear, lineWidth: 2)
-                )
-                .contentShape(Rectangle())
-                .simultaneousGesture(
-                  TapGesture(count: 2)
-                    .onEnded { _ in
-                      NSWorkspace.shared.selectFile(
-                        url.path, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
+                if playbackType == .speed {
+                  FolderSpeedPreview(
+                    url: url,
+                    isMuted: isMuted,
+                    speedOption: speedOption
+                  )
+                  .frame(width: 220, height: 124)
+                  .cornerRadius(8)
+                  .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                      .stroke(
+                        selectedURLs.contains(url) ? Color.accentColor : Color.clear, lineWidth: 2)
+                  )
+                  .contentShape(Rectangle())
+                  .simultaneousGesture(
+                    TapGesture(count: 2)
+                      .onEnded { _ in
+                        NSWorkspace.shared.selectFile(
+                          url.path, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
+                      }
+                  )
+                  .onTapGesture {
+                    if selectedURLs.contains(url) {
+                      selectedURLs.remove(url)
+                      selectionOrder.removeAll { $0 == url }
+                    } else {
+                      selectedURLs.insert(url)
+                      selectionOrder.append(url)
                     }
-                )
-                .onTapGesture {
-                  if selectedURLs.contains(url) {
-                    selectedURLs.remove(url)
-                    selectionOrder.removeAll { $0 == url }
-                  } else {
-                    selectedURLs.insert(url)
-                    selectionOrder.append(url)
                   }
-                }
-                .onKeyPress(.space) {
-                  if selectedURLs.contains(url) {
-                    NSWorkspace.shared.open(url)
-                    return .handled
+                  .onKeyPress(.space) {
+                    if selectedURLs.contains(url) {
+                      NSWorkspace.shared.open(url)
+                      return .handled
+                    }
+                    return .ignored
                   }
-                  return .ignored
+                } else {
+                  FolderHoverLoopPreview(
+                    url: url,
+                    isMuted: isMuted,
+                    numberOfClips: numberOfClips,
+                    clipLength: clipLength,
+                    playbackType: playbackType,
+                    speedOption: speedOption
+                  )
+                  .frame(width: 220, height: 124)
+                  .cornerRadius(8)
+                  .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                      .stroke(
+                        selectedURLs.contains(url) ? Color.accentColor : Color.clear, lineWidth: 2)
+                  )
+                  .contentShape(Rectangle())
+                  .simultaneousGesture(
+                    TapGesture(count: 2)
+                      .onEnded { _ in
+                        NSWorkspace.shared.selectFile(
+                          url.path, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
+                      }
+                  )
+                  .onTapGesture {
+                    if selectedURLs.contains(url) {
+                      selectedURLs.remove(url)
+                      selectionOrder.removeAll { $0 == url }
+                    } else {
+                      selectedURLs.insert(url)
+                      selectionOrder.append(url)
+                    }
+                  }
+                  .onKeyPress(.space) {
+                    if selectedURLs.contains(url) {
+                      NSWorkspace.shared.open(url)
+                      return .handled
+                    }
+                    return .ignored
+                  }
                 }
                 Text(url.lastPathComponent)
                   .font(.caption)
@@ -943,15 +982,26 @@ struct ContentView: View {
     VStack(spacing: 0) {
       if currentIndex < videoURLs.count {
         let url = videoURLs[currentIndex]
-        SingleClipLoopingPlayerFill(
-          url: url,
-          numberOfClips: numberOfClips,
-          clipLength: clipLength,
-          isMuted: isMuted
-        )
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .aspectRatio(16 / 9, contentMode: .fit)
-        .id(url)  // Force view recreation when URL changes
+        if playbackType == .speed {
+          SingleSpeedPlayerFill(
+            url: url,
+            speedOption: speedOption,
+            isMuted: isMuted
+          )
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .aspectRatio(16 / 9, contentMode: .fit)
+          .id(url)  // Force view recreation when URL changes
+        } else {
+          SingleClipLoopingPlayerFill(
+            url: url,
+            numberOfClips: numberOfClips,
+            clipLength: clipLength,
+            isMuted: isMuted
+          )
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .aspectRatio(16 / 9, contentMode: .fit)
+          .id(url)  // Force view recreation when URL changes
+        }
         if let info = fileInfo[url] {
           VStack(alignment: .leading, spacing: 4) {
             Text(url.lastPathComponent)
@@ -1215,18 +1265,30 @@ struct ContentView: View {
     VStack(spacing: 0) {
       if currentIndex < videoURLs.count {
         let url = videoURLs[currentIndex]
-        let times = getClipTimes(for: url, count: numberOfClips)
         GeometryReader { geometry in
           let columns = max(1, Int(geometry.size.width / 320))
           let gridItems = Array(repeating: GridItem(.flexible(), spacing: 16), count: columns)
           ScrollView {
             LazyVGrid(columns: gridItems, spacing: 16) {
-              ForEach(Array(times.enumerated()), id: \.offset) { (i, start) in
-                VideoClipPreview(
-                  url: url, startTime: start, length: Double(clipLength), isMuted: isMuted
+              if playbackType == .speed {
+                // In speed mode, show a single preview
+                SpeedClipPreview(
+                  url: url,
+                  speedOption: speedOption,
+                  isMuted: isMuted
                 )
                 .aspectRatio(16.0 / 9.0, contentMode: .fit)
                 .cornerRadius(12)
+              } else {
+                // In clips mode, show multiple previews
+                let times = getClipTimes(for: url, count: numberOfClips)
+                ForEach(Array(times.enumerated()), id: \.offset) { (i, start) in
+                  VideoClipPreview(
+                    url: url, startTime: start, length: Double(clipLength), isMuted: isMuted
+                  )
+                  .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                  .cornerRadius(12)
+                }
               }
             }
             .padding(16)
@@ -2444,12 +2506,692 @@ struct NoControlsPlayerView: NSViewRepresentable {
     view.layer = playerLayer
     view.wantsLayer = true
     playerLayer.needsDisplayOnBoundsChange = true
+
+    // Add rate observer
+    let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+    let observer = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+      print("NoControlsPlayerView: Current rate: \(player.rate), Time: \(time.seconds)")
+    }
+    context.coordinator.rateObserver = observer
+
     return view
   }
+
   func updateNSView(_ nsView: NSView, context: Context) {
     if let playerLayer = nsView.layer as? AVPlayerLayer {
       playerLayer.player = player
       playerLayer.frame = nsView.bounds
+
+      // Force rate update
+      let currentRate = player.rate
+      print("NoControlsPlayerView update: Current rate: \(currentRate)")
+      if currentRate != 0 {
+        player.rate = currentRate
+      }
+    }
+  }
+
+  func makeCoordinator() -> Coordinator {
+    Coordinator()
+  }
+
+  class Coordinator {
+    var rateObserver: Any?
+
+    deinit {
+      if let observer = rateObserver {
+        NotificationCenter.default.removeObserver(observer)
+      }
+    }
+  }
+}
+
+// MARK: — Speed Mode Views
+
+// MARK: — Single Speed Player Fill
+struct SingleSpeedPlayerFill: View {
+  let url: URL
+  let speedOption: SpeedOption
+  let isMuted: Bool
+  @State private var player: AVPlayer? = nil
+  @State private var duration: Double = 0
+  @State private var didAppear: Bool = false
+  @State private var showFallback: Bool = false
+  @State private var errorMessage: String? = nil
+  @State private var playbackEndObserver: NSObjectProtocol? = nil
+  @State private var periodicTimeObserver: Any? = nil
+  @State private var rateObserver: Any? = nil
+
+  var body: some View {
+    ZStack {
+      if showFallback {
+        VideoPlayer(player: player)
+          .aspectRatio(16 / 9, contentMode: .fit)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .cornerRadius(12)
+      } else if let player = player {
+        VideoPlayer(player: player)
+          .aspectRatio(16 / 9, contentMode: .fit)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .cornerRadius(12)
+          .onAppear {
+            if !didAppear {
+              print("SingleSpeedPlayerFill: Starting playback with speed \(speedOption.rawValue)")
+              startSpeedPlayback()
+              didAppear = true
+            }
+          }
+          .onDisappear {
+            stopPlayback()
+            didAppear = false
+          }
+      }
+      if let errorMessage = errorMessage {
+        VStack {
+          Spacer()
+          HStack {
+            Spacer()
+            VStack(spacing: 8) {
+              Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 32))
+                .foregroundColor(.red)
+              Text(errorMessage)
+                .foregroundColor(.red)
+                .font(.headline)
+                .multilineTextAlignment(.center)
+            }
+            .padding()
+            .background(Color.black.opacity(0.8))
+            .cornerRadius(12)
+            Spacer()
+          }
+          Spacer()
+        }
+      }
+    }
+    .onAppear {
+      setupPlayer()
+    }
+    .onDisappear {
+      cleanup()
+    }
+  }
+
+  private func setupPlayer() {
+    let asset = AVURLAsset(url: url)
+    asset.loadValuesAsynchronously(forKeys: ["duration"]) {
+      let d = asset.duration.seconds
+      DispatchQueue.main.async {
+        duration = d
+        let item = AVPlayerItem(asset: asset)
+        let newPlayer = AVPlayer(playerItem: item)
+        newPlayer.isMuted = isMuted
+        player = newPlayer
+
+        // Add periodic time observer for debugging
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
+          forInterval: interval, queue: .main
+        ) { time in
+          print(
+            "SingleSpeedPlayerFill: Current rate: \(newPlayer.rate), Expected rate: \(speedOption.rawValue)"
+          )
+        }
+
+        // Add rate observer
+        rateObserver = newPlayer.addPeriodicTimeObserver(
+          forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
+          queue: .main
+        ) { _ in
+          if newPlayer.rate != Float(speedOption.rawValue) {
+            print(
+              "SingleSpeedPlayerFill: Rate mismatch detected, forcing rate to \(speedOption.rawValue)"
+            )
+            newPlayer.rate = Float(speedOption.rawValue)
+          }
+        }
+
+        // Observe player status
+        NotificationCenter.default.addObserver(
+          forName: .AVPlayerItemFailedToPlayToEndTime,
+          object: item,
+          queue: .main
+        ) { note in
+          errorMessage = "Failed to play video."
+          showFallback = true
+        }
+        NotificationCenter.default.addObserver(
+          forName: .AVPlayerItemNewErrorLogEntry,
+          object: item,
+          queue: .main
+        ) { note in
+          errorMessage = "Playback error: \(String(describing: item.error?.localizedDescription))"
+          showFallback = true
+        }
+
+        // Observe rate changes
+        NotificationCenter.default.addObserver(
+          forName: .AVPlayerItemTimeJumped,
+          object: item,
+          queue: .main
+        ) { _ in
+          print("SingleSpeedPlayerFill: Time jumped, ensuring rate is \(speedOption.rawValue)")
+          newPlayer.rate = Float(speedOption.rawValue)
+        }
+
+        startSpeedPlayback()
+      }
+    }
+  }
+
+  private func startSpeedPlayback() {
+    guard let player = player else { return }
+    // Start at 2% of the video duration
+    let startTime = duration * 0.02
+    print(
+      "SingleSpeedPlayerFill: Setting up playback at time \(startTime) with speed \(speedOption.rawValue)"
+    )
+
+    // Set rate before seeking
+    player.rate = Float(speedOption.rawValue)
+    print("SingleSpeedPlayerFill: Initial rate set to \(player.rate)")
+
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
+      // Set rate again after seeking
+      player.rate = Float(speedOption.rawValue)
+      print("SingleSpeedPlayerFill: Rate after seek: \(player.rate)")
+      player.play()
+    }
+
+    // Add observer for playback end
+    playbackEndObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: player.currentItem,
+      queue: .main
+    ) { _ in
+      // When video ends, seek back to 2% and continue playing
+      print(
+        "SingleSpeedPlayerFill: Video ended, restarting at \(startTime) with speed \(speedOption.rawValue)"
+      )
+      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
+        player.rate = Float(speedOption.rawValue)
+        print("SingleSpeedPlayerFill: Rate after end seek: \(player.rate)")
+        player.play()
+      }
+    }
+  }
+
+  private func stopPlayback() {
+    if let player = player {
+      player.pause()
+      player.rate = 0
+    }
+    if let observer = playbackEndObserver {
+      NotificationCenter.default.removeObserver(observer)
+      playbackEndObserver = nil
+    }
+    if let observer = periodicTimeObserver {
+      player?.removeTimeObserver(observer)
+      periodicTimeObserver = nil
+    }
+    if let observer = rateObserver {
+      player?.removeTimeObserver(observer)
+      rateObserver = nil
+    }
+  }
+
+  private func cleanup() {
+    stopPlayback()
+    player = nil
+    didAppear = false
+  }
+}
+
+// MARK: — Speed Clip Preview
+struct SpeedClipPreview: View {
+  let url: URL
+  let speedOption: SpeedOption
+  let isMuted: Bool
+  @State private var player: AVPlayer? = nil
+  @State private var duration: Double = 0
+  @State private var didAppear: Bool = false
+  @State private var showFallback: Bool = false
+  @State private var errorMessage: String? = nil
+  @State private var playbackEndObserver: NSObjectProtocol? = nil
+  @State private var periodicTimeObserver: Any? = nil
+  @State private var rateObserver: Any? = nil
+
+  var body: some View {
+    ZStack {
+      if showFallback {
+        VideoPlayer(player: player)
+          .aspectRatio(16 / 9, contentMode: .fit)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .cornerRadius(12)
+      } else if let player = player {
+        VideoPlayer(player: player)
+          .aspectRatio(16 / 9, contentMode: .fit)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .cornerRadius(12)
+          .onAppear {
+            if !didAppear {
+              print("SpeedClipPreview: Starting playback with speed \(speedOption.rawValue)")
+              startSpeedPlayback()
+              didAppear = true
+            }
+          }
+          .onDisappear {
+            stopPlayback()
+            didAppear = false
+          }
+      }
+      if let errorMessage = errorMessage {
+        VStack {
+          Spacer()
+          HStack {
+            Spacer()
+            VStack(spacing: 8) {
+              Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 32))
+                .foregroundColor(.red)
+              Text(errorMessage)
+                .foregroundColor(.red)
+                .font(.headline)
+                .multilineTextAlignment(.center)
+            }
+            .padding()
+            .background(Color.black.opacity(0.8))
+            .cornerRadius(12)
+            Spacer()
+          }
+          Spacer()
+        }
+      }
+    }
+    .onAppear {
+      setupPlayer()
+    }
+    .onDisappear {
+      cleanup()
+    }
+  }
+
+  private func setupPlayer() {
+    let asset = AVURLAsset(url: url)
+    asset.loadValuesAsynchronously(forKeys: ["duration"]) {
+      let d = asset.duration.seconds
+      DispatchQueue.main.async {
+        duration = d
+        let item = AVPlayerItem(asset: asset)
+        let newPlayer = AVPlayer(playerItem: item)
+        newPlayer.isMuted = isMuted
+        player = newPlayer
+
+        // Add periodic time observer for debugging
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
+          forInterval: interval, queue: .main
+        ) { time in
+          print(
+            "SpeedClipPreview: Current rate: \(newPlayer.rate), Expected rate: \(speedOption.rawValue)"
+          )
+        }
+
+        // Add rate observer
+        rateObserver = newPlayer.addPeriodicTimeObserver(
+          forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
+          queue: .main
+        ) { _ in
+          if newPlayer.rate != Float(speedOption.rawValue) {
+            print(
+              "SpeedClipPreview: Rate mismatch detected, forcing rate to \(speedOption.rawValue)")
+            newPlayer.rate = Float(speedOption.rawValue)
+          }
+        }
+
+        // Observe player status
+        NotificationCenter.default.addObserver(
+          forName: .AVPlayerItemFailedToPlayToEndTime,
+          object: item,
+          queue: .main
+        ) { note in
+          errorMessage = "Failed to play video."
+          showFallback = true
+        }
+        NotificationCenter.default.addObserver(
+          forName: .AVPlayerItemNewErrorLogEntry,
+          object: item,
+          queue: .main
+        ) { note in
+          errorMessage = "Playback error: \(String(describing: item.error?.localizedDescription))"
+          showFallback = true
+        }
+
+        // Observe rate changes
+        NotificationCenter.default.addObserver(
+          forName: .AVPlayerItemTimeJumped,
+          object: item,
+          queue: .main
+        ) { _ in
+          print("SpeedClipPreview: Time jumped, ensuring rate is \(speedOption.rawValue)")
+          newPlayer.rate = Float(speedOption.rawValue)
+        }
+
+        startSpeedPlayback()
+      }
+    }
+  }
+
+  private func startSpeedPlayback() {
+    guard let player = player else { return }
+    // Start at 2% of the video duration
+    let startTime = duration * 0.02
+    print(
+      "SpeedClipPreview: Setting up playback at time \(startTime) with speed \(speedOption.rawValue)"
+    )
+
+    // Set rate before seeking
+    player.rate = Float(speedOption.rawValue)
+    print("SpeedClipPreview: Initial rate set to \(player.rate)")
+
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
+      // Set rate again after seeking
+      player.rate = Float(speedOption.rawValue)
+      print("SpeedClipPreview: Rate after seek: \(player.rate)")
+      player.play()
+    }
+
+    // Add observer for playback end
+    playbackEndObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: player.currentItem,
+      queue: .main
+    ) { _ in
+      // When video ends, seek back to 2% and continue playing
+      print(
+        "SpeedClipPreview: Video ended, restarting at \(startTime) with speed \(speedOption.rawValue)"
+      )
+      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
+        player.rate = Float(speedOption.rawValue)
+        print("SpeedClipPreview: Rate after end seek: \(player.rate)")
+        player.play()
+      }
+    }
+  }
+
+  private func stopPlayback() {
+    if let player = player {
+      player.pause()
+      player.rate = 0
+    }
+    if let observer = playbackEndObserver {
+      NotificationCenter.default.removeObserver(observer)
+      playbackEndObserver = nil
+    }
+    if let observer = periodicTimeObserver {
+      player?.removeTimeObserver(observer)
+      periodicTimeObserver = nil
+    }
+    if let observer = rateObserver {
+      player?.removeTimeObserver(observer)
+      rateObserver = nil
+    }
+  }
+
+  private func cleanup() {
+    stopPlayback()
+    player = nil
+    didAppear = false
+  }
+}
+
+// MARK: — Speed Hover Preview Card
+struct SpeedHoverPreviewCard: View {
+  let url: URL
+  let thumbnail: Image?
+  let isMuted: Bool
+  let speedOption: SpeedOption
+  var forcePlay: Bool = false
+  @State private var player: AVPlayer? = nil
+  @State private var isPlayerReady: Bool = false
+  @State private var playbackEndObserver: NSObjectProtocol? = nil
+  @State private var duration: Double = 0
+
+  var body: some View {
+    ZStack {
+      // Always show the static thumbnail as the background
+      if let thumbnail = thumbnail {
+        thumbnail
+          .resizable()
+          .aspectRatio(contentMode: .fill)
+      } else {
+        Color.black
+      }
+      // Overlay the video player if forcePlay is true and player is ready
+      if forcePlay {
+        if let player = player {
+          NoControlsPlayerView(player: player)
+            .onAppear {
+              startSpeedPlayback()
+            }
+            .onDisappear {
+              stopPlayback()
+            }
+        } else {
+          Color.clear
+            .onAppear {
+              if player == nil {
+                setupPlayer()
+              }
+            }
+        }
+      }
+    }
+    .clipped()
+  }
+
+  private func setupPlayer() {
+    let asset = AVURLAsset(url: url)
+    let item = AVPlayerItem(asset: asset)
+    let newPlayer = AVPlayer(playerItem: item)
+    newPlayer.isMuted = isMuted
+
+    // Load duration
+    asset.loadValuesAsynchronously(forKeys: ["duration"]) {
+      let d = asset.duration.seconds
+      DispatchQueue.main.async {
+        duration = d
+        player = newPlayer
+        isPlayerReady = true
+        if forcePlay {
+          startSpeedPlayback()
+        }
+      }
+    }
+  }
+
+  private func startSpeedPlayback() {
+    guard let player = player else { return }
+    // Start at 2% of the video duration
+    let startTime = duration * 0.02
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+    player.rate = Float(speedOption.rawValue)
+    player.play()
+
+    // Add observer for playback end
+    playbackEndObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: player.currentItem,
+      queue: .main
+    ) { _ in
+      // When video ends, seek back to 2% and continue playing
+      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+      player.rate = Float(speedOption.rawValue)
+      player.play()
+    }
+  }
+
+  private func stopPlayback() {
+    if let player = player {
+      player.pause()
+      player.rate = 0
+    }
+    if let observer = playbackEndObserver {
+      NotificationCenter.default.removeObserver(observer)
+      playbackEndObserver = nil
+    }
+  }
+}
+
+// MARK: — Folder Speed Preview
+struct FolderSpeedPreview: View {
+  let url: URL
+  let isMuted: Bool
+  let speedOption: SpeedOption
+  @State private var isHovered = false
+  @State private var player: AVPlayer? = nil
+  @State private var duration: Double = 0
+  @State private var fadeOpacity: Double = 0.0
+  @State private var thumbnail: Image? = nil
+  @State private var playbackEndObserver: NSObjectProtocol? = nil
+  @State private var periodicTimeObserver: Any? = nil
+
+  var body: some View {
+    ZStack {
+      // Always show the thumbnail as background
+      if let thumbnail = thumbnail {
+        thumbnail
+          .resizable()
+          .aspectRatio(contentMode: .fill)
+          .cornerRadius(8)
+      } else {
+        Color.black
+          .cornerRadius(8)
+      }
+
+      // Overlay the video player when hovered
+      if isHovered, let player = player {
+        NoControlsPlayerView(player: player)
+          .cornerRadius(8)
+          .opacity(fadeOpacity)
+          .onAppear {
+            withAnimation(.easeIn(duration: 0.2)) {
+              fadeOpacity = 1.0
+            }
+            print("FolderSpeedPreview: Starting playback with speed \(speedOption.rawValue)")
+            startSpeedPlayback()
+          }
+          .onDisappear {
+            withAnimation(.easeOut(duration: 0.2)) {
+              fadeOpacity = 0.0
+            }
+            stopPlayback()
+          }
+      }
+    }
+    .onHover { hovering in
+      isHovered = hovering
+      if hovering {
+        if player == nil {
+          setupPlayer()
+        } else {
+          startSpeedPlayback()
+        }
+      } else {
+        stopPlayback()
+      }
+    }
+    .task {
+      // Load thumbnail
+      if let cached = ContentView.thumbnailCache[url] {
+        thumbnail = cached
+      } else {
+        do {
+          let asset = AVURLAsset(url: url)
+          let generator = AVAssetImageGenerator(asset: asset)
+          generator.appliesPreferredTrackTransform = true
+          generator.maximumSize = CGSize(width: 400, height: 225)
+          // Use the same 2% offset as the video preview
+          let cmTime = CMTime(seconds: asset.duration.seconds * 0.02, preferredTimescale: 600)
+          let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
+          let image = Image(decorative: cgImage, scale: 1.0)
+          ContentView.thumbnailCache[url] = image
+          thumbnail = image
+        } catch {
+          print(
+            "Error loading thumbnail for \(url.lastPathComponent): \(error.localizedDescription)")
+        }
+      }
+    }
+    .clipped()
+    .cornerRadius(8)
+  }
+
+  private func setupPlayer() {
+    let asset = AVURLAsset(url: url)
+    asset.loadValuesAsynchronously(forKeys: ["duration"]) {
+      let d = asset.duration.seconds
+      DispatchQueue.main.async {
+        duration = d
+        let item = AVPlayerItem(asset: asset)
+        let newPlayer = AVPlayer(playerItem: item)
+        newPlayer.isMuted = isMuted
+        player = newPlayer
+
+        // Add periodic time observer for debugging
+        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
+        periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
+          forInterval: interval, queue: .main
+        ) { time in
+          print(
+            "FolderSpeedPreview: Current rate: \(newPlayer.rate), Expected rate: \(speedOption.rawValue)"
+          )
+        }
+
+        startSpeedPlayback()
+      }
+    }
+  }
+
+  private func startSpeedPlayback() {
+    guard let player = player else { return }
+    // Start at 2% of the video duration
+    let startTime = duration * 0.02
+    print(
+      "FolderSpeedPreview: Setting up playback at time \(startTime) with speed \(speedOption.rawValue)"
+    )
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+    player.rate = Float(speedOption.rawValue)
+    player.play()
+
+    // Add observer for playback end
+    playbackEndObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: player.currentItem,
+      queue: .main
+    ) { _ in
+      // When video ends, seek back to 2% and continue playing
+      print(
+        "FolderSpeedPreview: Video ended, restarting at \(startTime) with speed \(speedOption.rawValue)"
+      )
+      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+      player.rate = Float(speedOption.rawValue)
+      player.play()
+    }
+  }
+
+  private func stopPlayback() {
+    if let player = player {
+      player.pause()
+      player.rate = 0
+    }
+    if let observer = playbackEndObserver {
+      NotificationCenter.default.removeObserver(observer)
+      playbackEndObserver = nil
+    }
+    if let observer = periodicTimeObserver {
+      player?.removeTimeObserver(observer)
+      periodicTimeObserver = nil
     }
   }
 }
