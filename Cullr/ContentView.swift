@@ -495,7 +495,9 @@ struct ContentView: View {
                   url: url,
                   isMuted: isMuted,
                   numberOfClips: numberOfClips,
-                  clipLength: clipLength
+                  clipLength: clipLength,
+                  playbackType: playbackType,
+                  speedOption: speedOption
                 )
                 .frame(width: 220, height: 124)
                 .cornerRadius(8)
@@ -783,7 +785,14 @@ struct ContentView: View {
 
       // Pre-generate all thumbnails for all files and clips
       let allClipTimes: [(URL, [Double])] = videoURLs.map { url in
-        (url, getClipTimes(for: url, count: numberOfClips))
+        if playbackType == .speed {
+          // For speed mode, only generate one thumbnail at 2% offset
+          return (url, [0.02])
+        } else {
+          // For clips mode, generate thumbnails for all clips
+          let times = [0.02] + getClipTimes(for: url, count: numberOfClips)
+          return (url, times)
+        }
       }
       thumbnailsToLoad = allClipTimes.reduce(0) { $0 + $1.1.count }
       thumbnailsLoaded = 0
@@ -809,7 +818,10 @@ struct ContentView: View {
       let generator = AVAssetImageGenerator(asset: asset)
       generator.appliesPreferredTrackTransform = true
       generator.maximumSize = CGSize(width: 400, height: 225)
+
+      // Use the provided time directly since we already set it to 0.02 for speed mode in loadVideosAndThumbnails
       let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+
       if let cgImage = try? generator.copyCGImage(at: cmTime, actualTime: nil) {
         let image = Image(decorative: cgImage, scale: 1.0)
         DispatchQueue.main.async {
@@ -1301,6 +1313,8 @@ struct ContentView: View {
                   times: getClipTimes(for: url, count: numberOfClips),
                   staticThumbnails: staticThumbnails,
                   isMuted: isMuted,
+                  playbackType: playbackType,
+                  speedOption: speedOption,
                   isSelected: Binding(
                     get: { batchSelection[videoURLs.firstIndex(of: url) ?? 0] },
                     set: { newValue in
@@ -1370,21 +1384,41 @@ struct ContentView: View {
     let times: [Double]
     let staticThumbnails: [String: Image]
     let isMuted: Bool
+    let playbackType: PlaybackType
+    let speedOption: SpeedOption
     @Binding var isSelected: Bool
     let fileInfo: (size: String, duration: String, resolution: String, fps: String)?
     let isRowHovered: Bool
     let onHoverChanged: (Bool) -> Void
+    @State private var thumbnail: Image? = nil
 
     var body: some View {
       HStack {
         HStack(spacing: 8) {
-          ForEach(times, id: \.self) { time in
+          if playbackType == .clips {
+            ForEach(times, id: \.self) { time in
+              HoverPreviewCard(
+                url: url,
+                thumbnail: staticThumbnails[ContentView.thumbnailKey(url: url, time: time)],
+                isMuted: isMuted,
+                startTime: time,
+                forcePlay: isRowHovered,
+                playbackType: playbackType,
+                speedOption: speedOption
+              )
+              .frame(width: 120, height: 68)
+              .cornerRadius(10)
+            }
+          } else {
+            // In speed mode, show only one preview at 2% offset
             HoverPreviewCard(
               url: url,
-              thumbnail: staticThumbnails[ContentView.thumbnailKey(url: url, time: time)],
+              thumbnail: thumbnail,
               isMuted: isMuted,
-              startTime: time,
-              forcePlay: isRowHovered
+              startTime: 0.02,  // Use 2% offset for both thumbnail and playback
+              forcePlay: isRowHovered,
+              playbackType: playbackType,
+              speedOption: speedOption
             )
             .frame(width: 120, height: 68)
             .cornerRadius(10)
@@ -1415,6 +1449,28 @@ struct ContentView: View {
       .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
       .padding(.vertical, 8)
       .padding(.horizontal, 16)
+      .task {
+        // Load thumbnail exactly like folder view
+        if let cached = ContentView.thumbnailCache[url] {
+          thumbnail = cached
+        } else {
+          do {
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = CGSize(width: 400, height: 225)
+            // Use the same 2% offset as the video preview
+            let cmTime = CMTime(seconds: asset.duration.seconds * 0.02, preferredTimescale: 600)
+            let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
+            let image = Image(decorative: cgImage, scale: 1.0)
+            ContentView.thumbnailCache[url] = image
+            thumbnail = image
+          } catch {
+            print(
+              "Error loading thumbnail for \(url.lastPathComponent): \(error.localizedDescription)")
+          }
+        }
+      }
     }
   }
 
@@ -1770,7 +1826,11 @@ struct PreviewCard: View {
       // Add a small delay between thumbnail generations
       try await Task.sleep(nanoseconds: 50_000_000)  // 50ms delay
 
-      let cgImage = try await generator.image(at: .zero).image
+      // Get the duration and use 2% offset
+      let duration = try await asset.load(.duration)
+      let time = max(duration.seconds * 0.02, 0.0)
+      let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+      let cgImage = try await generator.image(at: cmTime).image
       let image = Image(cgImage, scale: 1.0, label: Text(url.lastPathComponent))
 
       await MainActor.run {
@@ -2040,7 +2100,13 @@ struct HoverPreviewCard: View {
   let isMuted: Bool
   var startTime: Double = 0
   var forcePlay: Bool = false
+  var playbackType: PlaybackType
+  var speedOption: SpeedOption
   @State private var player: AVPlayer? = nil
+  @State private var isPlayerReady: Bool = false
+  @State private var playbackEndObserver: NSObjectProtocol? = nil
+  @State private var duration: Double = 0
+
   var body: some View {
     ZStack {
       // Always show the static thumbnail as the background
@@ -2056,27 +2122,90 @@ struct HoverPreviewCard: View {
         if let player = player {
           NoControlsPlayerView(player: player)
             .onAppear {
-              player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-              player.play()
+              if playbackType == .clips {
+                player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+                player.play()
+              } else {
+                startSpeedPlayback(player: player)
+              }
             }
             .onDisappear {
-              player.pause()
+              stopPlayback()
             }
         } else {
           Color.clear
             .onAppear {
               if player == nil {
-                let asset = AVURLAsset(url: url)
-                let item = AVPlayerItem(asset: asset)
-                let newPlayer = AVPlayer(playerItem: item)
-                newPlayer.isMuted = isMuted
-                player = newPlayer
+                setupPlayer()
               }
             }
         }
       }
     }
     .clipped()
+  }
+
+  private func setupPlayer() {
+    let asset = AVURLAsset(url: url)
+    let item = AVPlayerItem(asset: asset)
+    let newPlayer = AVPlayer(playerItem: item)
+    newPlayer.isMuted = isMuted
+
+    // Load duration for speed mode
+    if playbackType == .speed {
+      asset.loadValuesAsynchronously(forKeys: ["duration"]) {
+        let d = asset.duration.seconds
+        DispatchQueue.main.async {
+          duration = d
+        }
+      }
+    }
+
+    // Observe player item status
+    NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: item,
+      queue: .main
+    ) { _ in
+      if playbackType == .speed {
+        newPlayer.seek(to: .zero)
+        newPlayer.rate = Float(speedOption.rawValue)
+        newPlayer.play()
+      }
+    }
+
+    player = newPlayer
+  }
+
+  private func startSpeedPlayback(player: AVPlayer) {
+    // Start at 2% of the video duration, matching the thumbnail time
+    let startTime = duration * 0.02
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+    player.rate = Float(speedOption.rawValue)
+    player.play()
+
+    // Add observer for playback end
+    playbackEndObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: player.currentItem,
+      queue: .main
+    ) { _ in
+      // When video ends, seek back to 2% and continue playing
+      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+      player.rate = Float(speedOption.rawValue)
+      player.play()
+    }
+  }
+
+  private func stopPlayback() {
+    if let player = player {
+      player.pause()
+      player.rate = 0
+    }
+    if let observer = playbackEndObserver {
+      NotificationCenter.default.removeObserver(observer)
+      playbackEndObserver = nil
+    }
   }
 }
 
@@ -2086,6 +2215,8 @@ struct FolderHoverLoopPreview: View {
   let isMuted: Bool
   let numberOfClips: Int
   let clipLength: Int
+  let playbackType: PlaybackType
+  let speedOption: SpeedOption
   @State private var isHovered = false
   @State private var player: AVPlayer? = nil
   @State private var currentClip: Int = 0
@@ -2098,6 +2229,7 @@ struct FolderHoverLoopPreview: View {
   @State private var isUserControlling: Bool = false
   @State private var lastSeekTime: Double = 0
   @State private var thumbnail: Image? = nil
+  @State private var playbackEndObserver: NSObjectProtocol? = nil
 
   var body: some View {
     ZStack {
@@ -2113,7 +2245,7 @@ struct FolderHoverLoopPreview: View {
       }
 
       // Overlay the video player when hovered
-      if isHovered, let player = player, !startTimes.isEmpty {
+      if isHovered, let player = player {
         NoControlsPlayerView(player: player)
           .cornerRadius(8)
           .opacity(fadeOpacity)
@@ -2121,13 +2253,17 @@ struct FolderHoverLoopPreview: View {
             withAnimation(.easeIn(duration: 0.2)) {
               fadeOpacity = 1.0
             }
-            startLoopingClips()
+            if playbackType == .clips {
+              startLoopingClips()
+            } else {
+              startSpeedPlayback()
+            }
           }
           .onDisappear {
             withAnimation(.easeOut(duration: 0.2)) {
               fadeOpacity = 0.0
             }
-            stopLoopingClips()
+            stopPlayback()
           }
       }
     }
@@ -2145,10 +2281,14 @@ struct FolderHoverLoopPreview: View {
             let d = asset.duration.seconds
             DispatchQueue.main.async {
               duration = d
-              startTimes = computeStartTimes(duration: d, count: numberOfClips)
-              currentClip = 0
-              isUserControlling = false
-              startLoopingClips()
+              if playbackType == .clips {
+                startTimes = computeStartTimes(duration: d, count: numberOfClips)
+                currentClip = 0
+                isUserControlling = false
+                startLoopingClips()
+              } else {
+                startSpeedPlayback()
+              }
               // Add observer for user interaction with controls
               NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemTimeJumped, object: item, queue: .main
@@ -2162,17 +2302,18 @@ struct FolderHoverLoopPreview: View {
               }
             }
           }
-        } else if duration > 0 && startTimes.isEmpty {
-          startTimes = computeStartTimes(duration: duration, count: numberOfClips)
-          currentClip = 0
-          isUserControlling = false
-          startLoopingClips()
-        } else {
-          isUserControlling = false
-          startLoopingClips()
+        } else if duration > 0 {
+          if playbackType == .clips {
+            startTimes = computeStartTimes(duration: duration, count: numberOfClips)
+            currentClip = 0
+            isUserControlling = false
+            startLoopingClips()
+          } else {
+            startSpeedPlayback()
+          }
         }
       } else {
-        stopLoopingClips()
+        stopPlayback()
       }
     }
     .task {
@@ -2199,6 +2340,42 @@ struct FolderHoverLoopPreview: View {
     }
     .clipped()
     .cornerRadius(8)
+  }
+
+  private func startSpeedPlayback() {
+    guard let player = player else { return }
+    // Start at 2% of the video duration, matching the thumbnail time
+    let startTime = duration * 0.02
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+    player.rate = Float(speedOption.rawValue)
+    player.play()
+
+    // Add observer for playback end
+    playbackEndObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: player.currentItem,
+      queue: .main
+    ) { _ in
+      // When video ends, seek back to 2% and continue playing
+      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+      player.rate = Float(speedOption.rawValue)
+      player.play()
+    }
+  }
+
+  private func stopPlayback() {
+    if let player = player, let observer = boundaryObserver {
+      player.removeTimeObserver(observer)
+      boundaryObserver = nil
+    }
+    player?.pause()
+    player?.rate = 0
+
+    // Remove playback end observer
+    if let observer = playbackEndObserver {
+      NotificationCenter.default.removeObserver(observer)
+      playbackEndObserver = nil
+    }
   }
 
   private func computeStartTimes(duration: Double, count: Int) -> [Double] {
