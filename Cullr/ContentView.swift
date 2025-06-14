@@ -55,7 +55,10 @@ enum SpeedOption: Double, CaseIterable, Identifiable {
   case x2 = 2.0
   case x4 = 4.0
   case x8 = 8.0
+  case x12 = 12.0
   case x16 = 16.0
+  case x24 = 24.0
+  case x32 = 32.0
 
   var id: Double { self.rawValue }
   var displayName: String { "x\(Int(self.rawValue))" }
@@ -194,6 +197,12 @@ struct ContentView: View {
   @State private var showDeleteConfirmation = false
   @State private var filesPendingDeletion: [URL] = []
 
+  // Add persistent player size
+  @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
+
+  // Add this to ContentView state:
+  @State private var viewReloadID = UUID()
+
   var body: some View {
     ZStack {
       Color.clear
@@ -243,6 +252,7 @@ struct ContentView: View {
           }
         }
       }
+      .id(viewReloadID)
       .alert(isPresented: $showDeleteConfirmation) {
         let fileCount = filesPendingDeletion.count
         let totalBytes = filesPendingDeletion.reduce(0) {
@@ -347,7 +357,7 @@ struct ContentView: View {
             .frame(width: 80)
           }
         }
-
+        // (Slider removed from here)
         HStack(spacing: 2) {
           Text("Delete:").frame(width: 50, alignment: .leading)
           TextField(
@@ -411,9 +421,10 @@ struct ContentView: View {
           Task {
             numberOfClips = tempNumberOfClips
             clipLength = tempClipLength
-            await initializeForCurrentMode()
             if let folder = folderURL {
               loadVideosAndThumbnails(from: folder)
+              // Hidden view reload
+              viewReloadID = UUID()
             }
           }
         }
@@ -424,12 +435,9 @@ struct ContentView: View {
 
       Picker("Mode:", selection: $playbackMode) {
         ForEach(
-          PlaybackMode.allCases.filter { mode in
-            if playbackType == .speed {
-              return mode != .sideBySide
-            }
-            return true
-          }
+          playbackType == .clips
+            ? [PlaybackMode.folderView, .batchList, .sideBySide, .single]
+            : [PlaybackMode.folderView, .batchList, .single]
         ) { mode in
           Text(mode.rawValue).tag(mode)
         }
@@ -490,7 +498,7 @@ struct ContentView: View {
     ZStack {
       VStack(spacing: 0) {
         if folderURL != nil && (playbackMode == .folderView || playbackMode == .batchList) {
-          HStack {
+          HStack(alignment: .center) {
             HStack(spacing: 4) {
               Picker("Sort by:", selection: $sortOption) {
                 ForEach(SortOption.allCases) { option in
@@ -505,6 +513,7 @@ struct ContentView: View {
               .buttonStyle(.plain)
             }
             Spacer()
+            playerSizeSlider(compact: true)
           }
           .padding(.horizontal, 16)
           .padding(.vertical, 8)
@@ -518,7 +527,9 @@ struct ContentView: View {
         }
 
         ScrollView {
-          LazyVGrid(columns: [GridItem(.adaptive(minimum: 220), spacing: 8)], spacing: 8) {
+          LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: playerPreviewSize), spacing: 8)], spacing: 8
+          ) {
             ForEach(videoURLs, id: \.self) { url in
               VStack(spacing: 4) {
                 if playbackType == .speed {
@@ -527,7 +538,7 @@ struct ContentView: View {
                     isMuted: isMuted,
                     speedOption: speedOption
                   )
-                  .frame(width: 220, height: 124)
+                  .frame(width: playerPreviewSize, height: playerPreviewSize * 0.5636)
                   .cornerRadius(8)
                   .overlay(
                     RoundedRectangle(cornerRadius: 8)
@@ -568,7 +579,7 @@ struct ContentView: View {
                     playbackType: playbackType,
                     speedOption: speedOption
                   )
-                  .frame(width: 220, height: 124)
+                  .frame(width: playerPreviewSize, height: playerPreviewSize * 0.5636)
                   .cornerRadius(8)
                   .overlay(
                     RoundedRectangle(cornerRadius: 8)
@@ -605,12 +616,12 @@ struct ContentView: View {
                   .font(.caption)
                   .lineLimit(2)
                   .truncationMode(.middle)
-                  .frame(width: 220, alignment: .leading)
+                  .frame(width: playerPreviewSize, alignment: .leading)
                 if let info = fileInfo[url] {
                   Text("\(info.size) • \(info.duration)")
                     .font(.caption2)
                     .foregroundColor(.secondary)
-                    .frame(width: 220, alignment: .leading)
+                    .frame(width: playerPreviewSize, alignment: .leading)
                 }
               }
             }
@@ -873,7 +884,7 @@ struct ContentView: View {
       }
 
       // Ensure we're in folder view mode
-      playbackMode = .folderView
+      //playbackMode = .folderView
 
     } catch {
       print("Error loading directory contents: \(error.localizedDescription)")
@@ -1295,10 +1306,16 @@ struct ContentView: View {
   // MARK: — Side-by-Side Clips View
   private func sideBySideClipsView() -> some View {
     VStack(spacing: 0) {
+      HStack {
+        Spacer()
+        playerSizeSlider(compact: true)
+      }
+      .padding(.horizontal, 16)
+      .padding(.top, 8)
       if currentIndex < videoURLs.count {
         let url = videoURLs[currentIndex]
         GeometryReader { geometry in
-          let columns = max(1, Int(geometry.size.width / 320))
+          let columns = max(1, Int(geometry.size.width / (playerPreviewSize + 16)))
           let gridItems = Array(repeating: GridItem(.flexible(), spacing: 16), count: columns)
           ScrollView {
             LazyVGrid(columns: gridItems, spacing: 16) {
@@ -1310,6 +1327,7 @@ struct ContentView: View {
                   isMuted: isMuted
                 )
                 .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                .frame(width: playerPreviewSize, height: playerPreviewSize * 0.5636)
                 .cornerRadius(12)
               } else {
                 // In clips mode, show multiple previews
@@ -1319,6 +1337,7 @@ struct ContentView: View {
                     url: url, startTime: start, length: Double(clipLength), isMuted: isMuted
                   )
                   .aspectRatio(16.0 / 9.0, contentMode: .fit)
+                  .frame(width: playerPreviewSize, height: playerPreviewSize * 0.5636)
                   .cornerRadius(12)
                 }
               }
@@ -1372,7 +1391,7 @@ struct ContentView: View {
       ZStack(alignment: .bottom) {
         VStack(spacing: 0) {
           if folderURL != nil {
-            HStack {
+            HStack(alignment: .center) {
               HStack(spacing: 4) {
                 Picker("Sort by:", selection: $sortOption) {
                   ForEach(SortOption.allCases) { option in
@@ -1387,6 +1406,7 @@ struct ContentView: View {
                 .buttonStyle(.plain)
               }
               Spacer()
+              playerSizeSlider(compact: true)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
@@ -1484,6 +1504,7 @@ struct ContentView: View {
     let isRowHovered: Bool
     let onHoverChanged: (Bool) -> Void
     @State private var thumbnail: Image? = nil
+    @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
 
     var body: some View {
       HStack {
@@ -1499,7 +1520,7 @@ struct ContentView: View {
                 playbackType: playbackType,
                 speedOption: speedOption
               )
-              .frame(width: 120, height: 68)
+              .frame(width: playerPreviewSize * 0.545, height: playerPreviewSize * 0.309)
               .cornerRadius(10)
             }
           } else {
@@ -1513,7 +1534,7 @@ struct ContentView: View {
               playbackType: playbackType,
               speedOption: speedOption
             )
-            .frame(width: 120, height: 68)
+            .frame(width: playerPreviewSize * 0.545, height: playerPreviewSize * 0.309)
             .cornerRadius(10)
           }
         }
@@ -1528,12 +1549,11 @@ struct ContentView: View {
               .foregroundColor(.secondary)
           }
         }
-        .frame(width: 220, alignment: .leading)
+        .frame(width: playerPreviewSize, alignment: .leading)
         Spacer()
       }
       .contentShape(Rectangle())
       .onHover { hovering in
-        print("BatchListRowView onHover for \(url.lastPathComponent): \(hovering)")
         onHoverChanged(hovering)
       }
       .onTapGesture {
@@ -1588,6 +1608,27 @@ struct ContentView: View {
 
   private func syncSelectedURLsFromBatchSelection() {
     selectedURLs = Set(zip(videoURLs, batchSelection).filter { $0.1 }.map { $0.0 })
+  }
+
+  // Add this view for the player size slider, to be used in all non-single views
+  @ViewBuilder
+  private func playerSizeSlider(compact: Bool = false) -> some View {
+    HStack {
+      Spacer()
+      HStack(spacing: 8) {
+        Slider(value: $playerPreviewSize, in: 100...600, step: 1)
+          .frame(width: 160)
+        Text(LocalizedStringKey("Player Size: "))
+          .font(.caption)
+          .foregroundColor(.secondary)
+        Text("\(Int(playerPreviewSize))")
+          .font(.caption)
+          .foregroundColor(.secondary)
+          .frame(width: 40, alignment: .trailing)
+      }
+      .padding(.trailing, 0)
+      .padding(.top, compact ? 0 : 4)
+    }
   }
 }
 
