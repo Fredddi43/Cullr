@@ -190,6 +190,10 @@ struct ContentView: View {
   @State private var tempNumberOfClips: Int = 5
   @State private var tempClipLength: Int = 3
 
+  // Add these states to ContentView:
+  @State private var showDeleteConfirmation = false
+  @State private var filesPendingDeletion: [URL] = []
+
   var body: some View {
     ZStack {
       Color.clear
@@ -238,6 +242,29 @@ struct ContentView: View {
             folderView()
           }
         }
+      }
+      .alert(isPresented: $showDeleteConfirmation) {
+        let fileCount = filesPendingDeletion.count
+        let totalBytes = filesPendingDeletion.reduce(0) {
+          $0 + ((try? FileManager.default.attributesOfItem(atPath: $1.path)[.size] as? UInt64) ?? 0)
+        }
+        let totalSize = formatFileSize(bytes: totalBytes)
+        let fileList = filesPendingDeletion.map { $0.lastPathComponent }.joined(separator: "\n")
+        return Alert(
+          title: Text("Delete \(fileCount) file\(fileCount == 1 ? "" : "s")?"),
+          message: Text(
+            "This will delete \(fileCount) file\(fileCount == 1 ? "" : "s") and free up \(totalSize):\n\n\(fileList)"
+          ),
+          primaryButton: .destructive(Text("Delete")) {
+            Task {
+              await processSelectedFiles(selected: Set(filesPendingDeletion))
+              filesPendingDeletion = []
+            }
+          },
+          secondaryButton: .cancel {
+            filesPendingDeletion = []
+          }
+        )
       }
     }
     .frame(minWidth: 1200, minHeight: 800)
@@ -414,6 +441,9 @@ struct ContentView: View {
           Task {
             await initializeForCurrentMode()
           }
+        } else {
+          // When switching to folder view, sync selection
+          syncBatchSelectionFromSelectedURLs()
         }
       }
     }
@@ -520,6 +550,7 @@ struct ContentView: View {
                       selectedURLs.insert(url)
                       selectionOrder.append(url)
                     }
+                    syncBatchSelectionFromSelectedURLs()
                   }
                   .onKeyPress(.space) {
                     if selectedURLs.contains(url) {
@@ -560,6 +591,7 @@ struct ContentView: View {
                       selectedURLs.insert(url)
                       selectionOrder.append(url)
                     }
+                    syncBatchSelectionFromSelectedURLs()
                   }
                   .onKeyPress(.space) {
                     if selectedURLs.contains(url) {
@@ -591,9 +623,8 @@ struct ContentView: View {
             .foregroundColor(.secondary)
           Spacer()
           Button("Delete Selected Files") {
-            Task {
-              await processSelectedFiles(selected: selectedURLs)
-            }
+            filesPendingDeletion = Array(selectedURLs)
+            showDeleteConfirmation = true
           }
           .buttonStyle(.borderedProminent)
           .disabled(selectedURLs.isEmpty)
@@ -935,10 +966,11 @@ struct ContentView: View {
 
   private func initializeForCurrentMode() async {
     guard !videoURLs.isEmpty else { return }
-    batchSelection = Array(repeating: false, count: videoURLs.count)
+    // Do NOT reset batchSelection or selectedURLs here
+    syncBatchSelectionFromSelectedURLs()
+    syncSelectedURLsFromBatchSelection()
     currentIndex = 0
     isPrepared = true
-
     if playbackMode == .single || playbackMode == .sideBySide {
       await prepareCurrentVideo()
     }
@@ -1386,6 +1418,7 @@ struct ContentView: View {
                       } else {
                         selectionOrder.removeAll { $0 == url }
                       }
+                      syncSelectedURLsFromBatchSelection()
                     }
                   ),
                   fileInfo: fileInfo[url],
@@ -1421,10 +1454,8 @@ struct ContentView: View {
                 .foregroundColor(.secondary)
               Spacer()
               Button("Delete Selected Files") {
-                let selected = Set(zip(videoURLs, batchSelection).filter { $0.1 }.map { $0.0 })
-                Task {
-                  await processSelectedFiles(selected: selected)
-                }
+                filesPendingDeletion = zip(videoURLs, batchSelection).filter { $0.1 }.map { $0.0 }
+                showDeleteConfirmation = true
               }
               .buttonStyle(.borderedProminent)
               .disabled(!batchSelection.contains(true))
@@ -1546,6 +1577,17 @@ struct ContentView: View {
     guard duration > 0, count > 0 else { return Array(repeating: 0.0, count: count) }
     let step = duration / Double(count + 1)
     return (1...count).map { Double($0) * step }
+  }
+
+  // Add these helpers to ContentView:
+  private func syncBatchSelectionFromSelectedURLs() {
+    for (i, url) in videoURLs.enumerated() {
+      batchSelection[i] = selectedURLs.contains(url)
+    }
+  }
+
+  private func syncSelectedURLsFromBatchSelection() {
+    selectedURLs = Set(zip(videoURLs, batchSelection).filter { $0.1 }.map { $0.0 })
   }
 }
 
