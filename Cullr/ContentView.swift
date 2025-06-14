@@ -2292,6 +2292,7 @@ struct FolderHoverLoopPreview: View {
   @State private var lastSeekTime: Double = 0
   @State private var thumbnail: Image? = nil
   @State private var playbackEndObserver: NSObjectProtocol? = nil
+  @State private var periodicTimeObserver: Any? = nil
 
   var body: some View {
     ZStack {
@@ -2312,16 +2313,20 @@ struct FolderHoverLoopPreview: View {
           .cornerRadius(8)
           .opacity(fadeOpacity)
           .onAppear {
+            print("FolderHoverLoopPreview: View appeared for \(url.lastPathComponent)")
             withAnimation(.easeIn(duration: 0.2)) {
               fadeOpacity = 1.0
             }
             if playbackType == .clips {
+              print("FolderHoverLoopPreview: Starting clip looping for \(url.lastPathComponent)")
               startLoopingClips()
             } else {
+              print("FolderHoverLoopPreview: Starting speed playback for \(url.lastPathComponent)")
               startSpeedPlayback()
             }
           }
           .onDisappear {
+            print("FolderHoverLoopPreview: View disappeared for \(url.lastPathComponent)")
             withAnimation(.easeOut(duration: 0.2)) {
               fadeOpacity = 0.0
             }
@@ -2330,51 +2335,24 @@ struct FolderHoverLoopPreview: View {
       }
     }
     .onHover { hovering in
+      print(
+        "FolderHoverLoopPreview: Hover state changed to \(hovering) for \(url.lastPathComponent)")
       isHovered = hovering
       if hovering {
         if player == nil {
-          let asset = AVURLAsset(url: url)
-          let item = AVPlayerItem(asset: asset)
-          let newPlayer = AVPlayer(playerItem: item)
-          newPlayer.isMuted = isMuted
-          player = newPlayer
-          // Load duration and compute start times
-          asset.loadValuesAsynchronously(forKeys: ["duration"]) {
-            let d = asset.duration.seconds
-            DispatchQueue.main.async {
-              duration = d
-              if playbackType == .clips {
-                startTimes = computeStartTimes(duration: d, count: numberOfClips)
-                currentClip = 0
-                isUserControlling = false
-                startLoopingClips()
-              } else {
-                startSpeedPlayback()
-              }
-              // Add observer for user interaction with controls
-              NotificationCenter.default.addObserver(
-                forName: .AVPlayerItemTimeJumped, object: item, queue: .main
-              ) { note in
-                if let currentTime = player?.currentTime().seconds {
-                  if abs(currentTime - lastSeekTime) > 1.0 {
-                    isUserControlling = true
-                  }
-                  lastSeekTime = currentTime
-                }
-              }
-            }
-          }
-        } else if duration > 0 {
+          print("FolderHoverLoopPreview: Setting up new player for \(url.lastPathComponent)")
+          setupPlayer()
+        } else {
           if playbackType == .clips {
-            startTimes = computeStartTimes(duration: duration, count: numberOfClips)
-            currentClip = 0
-            isUserControlling = false
+            print("FolderHoverLoopPreview: Restarting clip looping for \(url.lastPathComponent)")
             startLoopingClips()
           } else {
+            print("FolderHoverLoopPreview: Restarting speed playback for \(url.lastPathComponent)")
             startSpeedPlayback()
           }
         }
       } else {
+        print("FolderHoverLoopPreview: Stopping playback for \(url.lastPathComponent)")
         stopPlayback()
       }
     }
@@ -2404,39 +2382,34 @@ struct FolderHoverLoopPreview: View {
     .cornerRadius(8)
   }
 
-  private func startSpeedPlayback() {
-    guard let player = player else { return }
-    // Start at 2% of the video duration, matching the thumbnail time
-    let startTime = duration * 0.02
-    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-    player.rate = Float(speedOption.rawValue)
-    player.play()
+  private func setupPlayer() {
+    print("FolderHoverLoopPreview: Setting up player for \(url.lastPathComponent)")
+    let asset = AVURLAsset(url: url)
+    let playerItem = AVPlayerItem(asset: asset)
+    player = AVPlayer(playerItem: playerItem)
+    player?.isMuted = isMuted
 
-    // Add observer for playback end
-    playbackEndObserver = NotificationCenter.default.addObserver(
-      forName: .AVPlayerItemDidPlayToEndTime,
-      object: player.currentItem,
-      queue: .main
-    ) { _ in
-      // When video ends, seek back to 2% and continue playing
-      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-      player.rate = Float(speedOption.rawValue)
-      player.play()
+    // Add periodic time observer
+    let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+    periodicTimeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) {
+      time in
+      print("FolderHoverLoopPreview: Current time: \(time.seconds) for \(url.lastPathComponent)")
     }
-  }
 
-  private func stopPlayback() {
-    if let player = player, let observer = boundaryObserver {
-      player.removeTimeObserver(observer)
-      boundaryObserver = nil
-    }
-    player?.pause()
-    player?.rate = 0
-
-    // Remove playback end observer
-    if let observer = playbackEndObserver {
-      NotificationCenter.default.removeObserver(observer)
-      playbackEndObserver = nil
+    // Observe duration
+    Task {
+      let duration = try await asset.load(.duration)
+      print(
+        "FolderHoverLoopPreview: Video duration: \(duration.seconds) for \(url.lastPathComponent)")
+      await MainActor.run {
+        self.duration = duration.seconds
+        if playbackType == .clips {
+          startTimes = computeStartTimes(duration: duration.seconds, count: numberOfClips)
+          print(
+            "FolderHoverLoopPreview: Generated clip times: \(startTimes) for \(url.lastPathComponent)"
+          )
+        }
+      }
     }
   }
 
@@ -2447,58 +2420,98 @@ struct FolderHoverLoopPreview: View {
     return (0..<count).map { start + Double($0) * interval }
   }
 
-  private func startLoopingClips() {
-    stopLoopingClips()
-    guard !startTimes.isEmpty, let player = player else { return }
-    currentClip = 0
-    playClip(index: currentClip)
-  }
-
-  private func stopLoopingClips() {
-    if let player = player, let observer = boundaryObserver {
-      player.removeTimeObserver(observer)
-      boundaryObserver = nil
-    }
-    player?.pause()
-  }
-
-  private func playClip(index: Int) {
-    guard let player = player, !startTimes.isEmpty else { return }
-    let start = startTimes[index]
-    let end = start + Double(clipLength)
-
-    // Remove previous observer
-    if let observer = boundaryObserver {
-      player.removeTimeObserver(observer)
-      boundaryObserver = nil
+  private func startSpeedPlayback() {
+    guard let player = player else {
+      print(
+        "FolderHoverLoopPreview: Cannot start playback - player is nil for \(url.lastPathComponent)"
+      )
+      return
     }
 
-    // Seek to start position
-    player.seek(to: CMTime(seconds: start, preferredTimescale: 600)) { _ in
-      // Add boundary observer for end of clip
-      let boundary = CMTime(seconds: end, preferredTimescale: 600)
-      self.boundaryObserver = player.addBoundaryTimeObserver(
-        forTimes: [NSValue(time: boundary)], queue: .main
-      ) {
-        if !self.isUserControlling {
-          player.pause()
-          // Move to next clip
-          self.currentClip = (self.currentClip + 1) % self.startTimes.count
-          self.playClip(index: self.currentClip)
-        } else {
-          player.pause()
-        }
-      }
+    print(
+      "FolderHoverLoopPreview: Starting speed playback at \(speedOption.rawValue)x for \(url.lastPathComponent)"
+    )
+    player.rate = Float(speedOption.rawValue)
+    player.seek(to: CMTime(seconds: duration * 0.02, preferredTimescale: 600))
+    player.play()
 
-      // Start playback
+    // Add playback end observer
+    playbackEndObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: player.currentItem,
+      queue: .main
+    ) { _ in
+      print("FolderHoverLoopPreview: Playback ended for \(url.lastPathComponent)")
+      player.seek(to: CMTime(seconds: duration * 0.02, preferredTimescale: 600))
       player.play()
+    }
+  }
+
+  private func startLoopingClips() {
+    guard let player = player else {
+      print(
+        "FolderHoverLoopPreview: Cannot start clip looping - player is nil for \(url.lastPathComponent)"
+      )
+      return
+    }
+
+    print("FolderHoverLoopPreview: Starting clip looping for \(url.lastPathComponent)")
+    currentClip = 0
+    playCurrentClip()
+  }
+
+  private func playCurrentClip() {
+    guard let player = player, !startTimes.isEmpty else {
+      print(
+        "FolderHoverLoopPreview: Cannot play clip - player is nil or no start times for \(url.lastPathComponent)"
+      )
+      return
+    }
+
+    let startTime = startTimes[currentClip]
+    print(
+      "FolderHoverLoopPreview: Playing clip \(currentClip + 1)/\(startTimes.count) at time \(startTime) for \(url.lastPathComponent)"
+    )
+
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+    player.rate = 1.0
+    player.play()
+
+    // Schedule next clip
+    timer?.invalidate()
+    timer = Timer.scheduledTimer(withTimeInterval: Double(clipLength), repeats: false) { _ in
+      self.currentClip = (self.currentClip + 1) % self.startTimes.count
+      print(
+        "FolderHoverLoopPreview: Moving to next clip \(self.currentClip + 1)/\(self.startTimes.count) for \(url.lastPathComponent)"
+      )
+      self.playCurrentClip()
+    }
+  }
+
+  private func stopPlayback() {
+    print("FolderHoverLoopPreview: Stopping playback for \(url.lastPathComponent)")
+    player?.pause()
+    player?.rate = 0
+    timer?.invalidate()
+    timer = nil
+
+    if let observer = playbackEndObserver {
+      NotificationCenter.default.removeObserver(observer)
+      playbackEndObserver = nil
+    }
+
+    if let observer = periodicTimeObserver {
+      player?.removeTimeObserver(observer)
+      periodicTimeObserver = nil
     }
   }
 }
 
 struct NoControlsPlayerView: NSViewRepresentable {
   let player: AVPlayer
+
   func makeNSView(context: Context) -> NSView {
+    print("NoControlsPlayerView: Creating new player view")
     let view = NSView()
     let playerLayer = AVPlayerLayer(player: player)
     playerLayer.videoGravity = .resizeAspectFill
@@ -2525,7 +2538,7 @@ struct NoControlsPlayerView: NSViewRepresentable {
       // Force rate update
       let currentRate = player.rate
       print("NoControlsPlayerView update: Current rate: \(currentRate)")
-      if currentRate != 0 {
+      if currentRate != 0.0 {
         player.rate = currentRate
       }
     }
@@ -3055,6 +3068,7 @@ struct FolderSpeedPreview: View {
   @State private var thumbnail: Image? = nil
   @State private var playbackEndObserver: NSObjectProtocol? = nil
   @State private var periodicTimeObserver: Any? = nil
+  @State private var rateObserver: NSObjectProtocol? = nil
 
   var body: some View {
     ZStack {
@@ -3075,6 +3089,7 @@ struct FolderSpeedPreview: View {
           .cornerRadius(8)
           .opacity(fadeOpacity)
           .onAppear {
+            print("FolderSpeedPreview: View appeared for \(url.lastPathComponent)")
             withAnimation(.easeIn(duration: 0.2)) {
               fadeOpacity = 1.0
             }
@@ -3082,6 +3097,7 @@ struct FolderSpeedPreview: View {
             startSpeedPlayback()
           }
           .onDisappear {
+            print("FolderSpeedPreview: View disappeared for \(url.lastPathComponent)")
             withAnimation(.easeOut(duration: 0.2)) {
               fadeOpacity = 0.0
             }
@@ -3090,14 +3106,18 @@ struct FolderSpeedPreview: View {
       }
     }
     .onHover { hovering in
+      print("FolderSpeedPreview: Hover state changed to \(hovering) for \(url.lastPathComponent)")
       isHovered = hovering
       if hovering {
         if player == nil {
+          print("FolderSpeedPreview: Setting up new player for \(url.lastPathComponent)")
           setupPlayer()
         } else {
+          print("FolderSpeedPreview: Restarting playback for \(url.lastPathComponent)")
           startSpeedPlayback()
         }
       } else {
+        print("FolderSpeedPreview: Stopping playback for \(url.lastPathComponent)")
         stopPlayback()
       }
     }
@@ -3128,70 +3148,100 @@ struct FolderSpeedPreview: View {
   }
 
   private func setupPlayer() {
+    print("FolderSpeedPreview: Setting up player for \(url.lastPathComponent)")
     let asset = AVURLAsset(url: url)
-    asset.loadValuesAsynchronously(forKeys: ["duration"]) {
-      let d = asset.duration.seconds
-      DispatchQueue.main.async {
-        duration = d
-        let item = AVPlayerItem(asset: asset)
-        let newPlayer = AVPlayer(playerItem: item)
-        newPlayer.isMuted = isMuted
-        player = newPlayer
+    let playerItem = AVPlayerItem(asset: asset)
+    player = AVPlayer(playerItem: playerItem)
+    player?.isMuted = isMuted
 
-        // Add periodic time observer for debugging
-        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
-        periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
-          forInterval: interval, queue: .main
-        ) { time in
-          print(
-            "FolderSpeedPreview: Current rate: \(newPlayer.rate), Expected rate: \(speedOption.rawValue)"
-          )
-        }
+    // Add periodic time observer
+    let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+    periodicTimeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) {
+      time in
+      print("FolderSpeedPreview: Current time: \(time.seconds) for \(url.lastPathComponent)")
+    }
 
-        startSpeedPlayback()
+    // Add rate observer
+    rateObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemTimeJumped,
+      object: playerItem,
+      queue: .main
+    ) { _ in
+      print(
+        "FolderSpeedPreview: Time jumped, enforcing rate \(speedOption.rawValue) for \(url.lastPathComponent)"
+      )
+      player?.rate = Float(speedOption.rawValue)
+    }
+
+    // Observe duration
+    Task {
+      let duration = try await asset.load(.duration)
+      print("FolderSpeedPreview: Video duration: \(duration.seconds) for \(url.lastPathComponent)")
+      await MainActor.run {
+        self.duration = duration.seconds
       }
     }
   }
 
   private func startSpeedPlayback() {
-    guard let player = player else { return }
-    // Start at 2% of the video duration
-    let startTime = duration * 0.02
-    print(
-      "FolderSpeedPreview: Setting up playback at time \(startTime) with speed \(speedOption.rawValue)"
-    )
-    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-    player.rate = Float(speedOption.rawValue)
-    player.play()
+    guard let player = player else {
+      print(
+        "FolderSpeedPreview: Cannot start playback - player is nil for \(url.lastPathComponent)")
+      return
+    }
 
-    // Add observer for playback end
+    print(
+      "FolderSpeedPreview: Starting speed playback at \(speedOption.rawValue)x for \(url.lastPathComponent)"
+    )
+
+    // Set rate before seeking to ensure it's applied
+    player.rate = Float(speedOption.rawValue)
+
+    // Seek to start position
+    player.seek(to: CMTime(seconds: duration * 0.02, preferredTimescale: 600)) { _ in
+      // Re-apply rate after seek completes
+      print(
+        "FolderSpeedPreview: Seek completed, enforcing rate \(self.speedOption.rawValue) for \(self.url.lastPathComponent)"
+      )
+      player.rate = Float(self.speedOption.rawValue)
+      player.play()
+    }
+
+    // Add playback end observer
     playbackEndObserver = NotificationCenter.default.addObserver(
       forName: .AVPlayerItemDidPlayToEndTime,
       object: player.currentItem,
       queue: .main
     ) { _ in
-      // When video ends, seek back to 2% and continue playing
-      print(
-        "FolderSpeedPreview: Video ended, restarting at \(startTime) with speed \(speedOption.rawValue)"
-      )
-      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-      player.rate = Float(speedOption.rawValue)
-      player.play()
+      print("FolderSpeedPreview: Playback ended for \(url.lastPathComponent)")
+      player.seek(to: CMTime(seconds: duration * 0.02, preferredTimescale: 600)) { _ in
+        print(
+          "FolderSpeedPreview: Restarting playback at rate \(speedOption.rawValue) for \(url.lastPathComponent)"
+        )
+        player.rate = Float(speedOption.rawValue)
+        player.play()
+      }
     }
   }
 
   private func stopPlayback() {
-    if let player = player {
-      player.pause()
-      player.rate = 0
-    }
+    print("FolderSpeedPreview: Stopping playback for \(url.lastPathComponent)")
+    player?.pause()
+    player?.rate = 0
+
     if let observer = playbackEndObserver {
       NotificationCenter.default.removeObserver(observer)
       playbackEndObserver = nil
     }
+
     if let observer = periodicTimeObserver {
       player?.removeTimeObserver(observer)
       periodicTimeObserver = nil
+    }
+
+    if let observer = rateObserver {
+      NotificationCenter.default.removeObserver(observer)
+      rateObserver = nil
     }
   }
 }
