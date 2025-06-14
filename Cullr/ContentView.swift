@@ -86,28 +86,63 @@ struct NonFocusableTextFieldStyle: TextFieldStyle {
   }
 }
 
-// MARK: — Key Event Handler for Global Spacebar
-struct KeyEventHandlingView: NSViewRepresentable {
-  var onSpace: () -> Void
-  func makeNSView(context: Context) -> NSView {
-    let view = KeyCatcherView()
-    view.onSpace = onSpace
-    return view
-  }
-  func updateNSView(_ nsView: NSView, context: Context) {}
-  class KeyCatcherView: NSView {
-    var onSpace: (() -> Void)?
-    override var acceptsFirstResponder: Bool { true }
-    override func keyDown(with event: NSEvent) {
-      if event.keyCode == 49 {  // Spacebar
-        onSpace?()
-      } else {
-        super.keyDown(with: event)
+// MARK: — Global Event Monitor for Hotkeys
+class GlobalHotkeyMonitor: ObservableObject {
+  private var localEventMonitor: Any?
+
+  var onSpace: (() -> Void)?
+  var onDelete: (() -> Void)?
+  var onKeep: (() -> Void)?
+  var deleteKey: String = "d"
+  var keepKey: String = "k"
+
+  func startMonitoring() {
+    print("GlobalHotkeyMonitor: Starting monitoring")
+
+    // Local event monitor (when app is focused)
+    localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+      print(
+        "GlobalHotkeyMonitor: Local key event - keyCode: \(event.keyCode), char: '\(event.charactersIgnoringModifiers?.lowercased() ?? "")'"
+      )
+
+      if self.handleKeyEvent(event) {
+        print("GlobalHotkeyMonitor: Event handled, returning nil")
+        return nil  // Consume the event
       }
+      return event  // Let the event continue
     }
-    override func viewDidMoveToWindow() {
-      window?.makeFirstResponder(self)
+  }
+
+  func stopMonitoring() {
+    print("GlobalHotkeyMonitor: Stopping monitoring")
+    if let monitor = localEventMonitor {
+      NSEvent.removeMonitor(monitor)
+      localEventMonitor = nil
     }
+  }
+
+  private func handleKeyEvent(_ event: NSEvent) -> Bool {
+    let keyChar = event.charactersIgnoringModifiers?.lowercased() ?? ""
+
+    if event.keyCode == 49 {  // Spacebar
+      print("GlobalHotkeyMonitor: Spacebar pressed")
+      onSpace?()
+      return true
+    } else if keyChar == deleteKey.lowercased() {
+      print("GlobalHotkeyMonitor: Delete key ('\(deleteKey)') pressed")
+      onDelete?()
+      return true
+    } else if keyChar == keepKey.lowercased() {
+      print("GlobalHotkeyMonitor: Keep key ('\(keepKey)') pressed")
+      onKeep?()
+      return true
+    }
+
+    return false
+  }
+
+  deinit {
+    stopMonitoring()
   }
 }
 
@@ -143,6 +178,321 @@ class QuickLookPreviewCoordinator: NSObject, QLPreviewPanelDataSource, QLPreview
   }
   override func endPreviewPanelControl(_ panel: QLPreviewPanel!) {
     // No-op for now
+  }
+}
+
+// Replace VideoPlayer with custom implementation
+struct CustomVideoPlayerView: NSViewRepresentable {
+  let player: AVPlayer
+
+  func makeNSView(context: Context) -> NSView {
+    let view = NSView()
+    let playerLayer = AVPlayerLayer(player: player)
+    playerLayer.videoGravity = .resizeAspectFill
+    playerLayer.frame = .zero
+    view.layer = playerLayer
+    view.wantsLayer = true
+    playerLayer.needsDisplayOnBoundsChange = true
+    return view
+  }
+
+  func updateNSView(_ nsView: NSView, context: Context) {
+    if let playerLayer = nsView.layer as? AVPlayerLayer {
+      playerLayer.player = player
+      playerLayer.frame = nsView.bounds
+    }
+  }
+
+  static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
+    if let playerLayer = nsView.layer as? AVPlayerLayer {
+      playerLayer.player = nil
+    }
+  }
+}
+
+// Custom video player with controls for single view
+struct CustomVideoPlayerWithControls: View {
+  let player: AVPlayer
+  let mode: PlayerMode
+  let onPreviousClip: (() -> Void)?
+  let onNextClip: (() -> Void)?
+  let onSpeedChange: ((SpeedOption) -> Void)?
+  let currentSpeed: SpeedOption?
+  @Binding var globalIsMuted: Bool
+
+  @State private var isPlaying = false
+  @State private var currentTime: Double = 0
+  @State private var duration: Double = 0
+  @State private var timeObserver: Any?
+  @State private var isDragging = false
+  @State private var isMuted = false
+  @State private var sliderValue: Double = 0
+  @State private var wasPlayingBeforeScrub = false
+
+  enum PlayerMode {
+    case clips
+    case speed
+  }
+
+  init(
+    player: AVPlayer, mode: PlayerMode = .clips, onPreviousClip: (() -> Void)? = nil,
+    onNextClip: (() -> Void)? = nil, onSpeedChange: ((SpeedOption) -> Void)? = nil,
+    currentSpeed: SpeedOption? = nil, globalIsMuted: Binding<Bool>
+  ) {
+    self.player = player
+    self.mode = mode
+    self.onPreviousClip = onPreviousClip
+    self.onNextClip = onNextClip
+    self.onSpeedChange = onSpeedChange
+    self.currentSpeed = currentSpeed
+    self._globalIsMuted = globalIsMuted
+  }
+
+  var body: some View {
+    VStack(spacing: 0) {
+      // Video player
+      CustomVideoPlayerView(player: player)
+        .onAppear {
+          setupTimeObserver()
+          loadDuration()
+          updatePlayingState()
+          // Sync player mute state with global state
+          player.isMuted = globalIsMuted
+          updateMuteState()
+        }
+        .onDisappear {
+          removeTimeObserver()
+        }
+        .onTapGesture {
+          togglePlayPause()
+        }
+
+      // Controls
+      VStack(spacing: 12) {
+        // Time slider
+        HStack {
+          Text(timeString(from: currentTime))
+            .font(.caption)
+            .foregroundColor(.white)
+            .frame(width: 50, alignment: .leading)
+
+          Slider(
+            value: $sliderValue,
+            in: 0...max(duration, 1),
+            onEditingChanged: { editing in
+              isDragging = editing
+              if editing {
+                // Store playing state and pause for clips mode only
+                wasPlayingBeforeScrub = isPlaying
+                if mode == .clips {
+                  player.pause()
+                }
+              } else {
+                // Seek and resume based on mode
+                seek(to: sliderValue)
+                if mode == .clips && wasPlayingBeforeScrub {
+                  player.play()
+                } else if mode == .speed && isPlaying {
+                  player.play()
+                }
+              }
+            }
+          )
+          .accentColor(.white)
+          .onChange(of: sliderValue) { newValue in
+            if isDragging {
+              seek(to: newValue)
+            }
+          }
+
+          Text(timeString(from: duration))
+            .font(.caption)
+            .foregroundColor(.white)
+            .frame(width: 50, alignment: .trailing)
+        }
+
+        // Main controls row
+        HStack(spacing: 20) {
+          // Clip navigation (for clips mode)
+          if mode == .clips {
+            Button(action: { onPreviousClip?() }) {
+              Image(systemName: "backward.fill")
+                .font(.system(size: 20))
+                .foregroundColor(.white)
+            }
+            .buttonStyle(.plain)
+            .disabled(onPreviousClip == nil)
+          }
+
+          // Speed controls (for speed mode)
+          if mode == .speed, let currentSpeed = currentSpeed {
+            Menu {
+              ForEach(SpeedOption.allCases, id: \.self) { speed in
+                Button(speed.displayName) {
+                  onSpeedChange?(speed)
+                }
+              }
+            } label: {
+              HStack {
+                Text(currentSpeed.displayName)
+                Image(systemName: "chevron.up.chevron.down")
+              }
+              .font(.system(size: 16))
+              .foregroundColor(.white)
+            }
+            .buttonStyle(.plain)
+          }
+
+          Spacer()
+
+          // Play/pause button
+          Button(action: togglePlayPause) {
+            Image(systemName: isPlaying ? "pause.circle.fill" : "play.circle.fill")
+              .font(.system(size: 40))
+              .foregroundColor(.white)
+          }
+          .buttonStyle(.plain)
+
+          Spacer()
+
+          // Mute/unmute button
+          Button(action: toggleMute) {
+            Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.2.fill")
+              .font(.system(size: 20))
+              .foregroundColor(.white)
+          }
+          .buttonStyle(.plain)
+
+          // Clip navigation (for clips mode)
+          if mode == .clips {
+            Button(action: { onNextClip?() }) {
+              Image(systemName: "forward.fill")
+                .font(.system(size: 20))
+                .foregroundColor(.white)
+            }
+            .buttonStyle(.plain)
+            .disabled(onNextClip == nil)
+          }
+        }
+      }
+      .padding(.horizontal, 20)
+      .padding(.vertical, 16)
+      .background(Color.black.opacity(0.8))
+    }
+  }
+
+  private func setupTimeObserver() {
+    removeTimeObserver()  // Clean up any existing observer
+    let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
+    timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
+      let newTime = time.seconds
+      if !isDragging && newTime.isFinite {
+        currentTime = newTime
+        sliderValue = newTime
+      }
+      updatePlayingState()
+    }
+  }
+
+  private func removeTimeObserver() {
+    if let observer = timeObserver {
+      player.removeTimeObserver(observer)
+      timeObserver = nil
+    }
+  }
+
+  private func loadDuration() {
+    if let currentItem = player.currentItem {
+      let itemDuration = currentItem.duration.seconds
+      if itemDuration.isFinite && itemDuration > 0 {
+        duration = itemDuration
+      }
+    }
+  }
+
+  private func updatePlayingState() {
+    isPlaying = player.rate > 0 && player.error == nil
+  }
+
+  private func updateMuteState() {
+    isMuted = player.isMuted
+    // Sync with global state
+    globalIsMuted = player.isMuted
+  }
+
+  private func togglePlayPause() {
+    if mode == .speed {
+      // For speed mode, check rate directly
+      if player.rate > 0 {
+        player.pause()
+        player.rate = 0
+        isPlaying = false  // Immediately update state
+      } else {
+        player.play()
+        if let speed = currentSpeed {
+          player.rate = Float(speed.rawValue)
+        } else {
+          player.rate = 1.0
+        }
+        isPlaying = true  // Immediately update state
+      }
+    } else {
+      // For clips mode, normal play/pause
+      if isPlaying {
+        player.pause()
+      } else {
+        player.play()
+      }
+    }
+    // Force immediate update
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+      updatePlayingState()
+    }
+  }
+
+  private func toggleMute() {
+    globalIsMuted.toggle()
+    player.isMuted = globalIsMuted
+    isMuted = globalIsMuted
+  }
+
+  private func seek(to time: Double) {
+    guard time.isFinite && time >= 0 else { return }
+    let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+    player.seek(to: cmTime, toleranceBefore: .zero, toleranceAfter: .zero)
+  }
+
+  private func timeString(from seconds: Double) -> String {
+    guard seconds.isFinite && seconds >= 0 else { return "0:00" }
+    let minutes = Int(seconds) / 60
+    let secs = Int(seconds) % 60
+    return String(format: "%d:%02d", minutes, secs)
+  }
+}
+
+// Fallback view for when video fails
+struct VideoFallbackView: View {
+  let url: URL
+  let errorMessage: String
+
+  var body: some View {
+    VStack(spacing: 16) {
+      Image(systemName: "play.circle.fill")
+        .font(.system(size: 64))
+        .foregroundColor(.white)
+      Text("Video Unavailable")
+        .font(.headline)
+        .foregroundColor(.white)
+      Text(url.lastPathComponent)
+        .font(.subheadline)
+        .foregroundColor(.secondary)
+      Text(errorMessage)
+        .font(.caption)
+        .foregroundColor(.red)
+        .multilineTextAlignment(.center)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .background(Color.black)
   }
 }
 
@@ -209,6 +559,9 @@ struct ContentView: View {
   @State private var currentFolderIndex: Int = 0
   private var isFolderCollectionMode: Bool { folderCollection.count > 1 }
 
+  // Global hotkey monitor
+  @StateObject private var hotkeyMonitor = GlobalHotkeyMonitor()
+
   var body: some View {
     ZStack {
       Color.clear
@@ -226,15 +579,36 @@ struct ContentView: View {
           DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             isTextFieldDisabled = false
           }
+
+          // Set up hotkey monitor
+          hotkeyMonitor.onSpace = {
+            if !hotkeyFieldFocused {
+              handleGlobalSpacebar()
+            }
+          }
+          hotkeyMonitor.onDelete = {
+            if !hotkeyFieldFocused && (playbackMode == .single || playbackMode == .sideBySide) {
+              deleteCurrentVideo()
+            }
+          }
+          hotkeyMonitor.onKeep = {
+            if !hotkeyFieldFocused && (playbackMode == .single || playbackMode == .sideBySide) {
+              skipCurrentVideo()
+            }
+          }
+          hotkeyMonitor.deleteKey = deleteHotkey
+          hotkeyMonitor.keepKey = keepHotkey
+          hotkeyMonitor.startMonitoring()
         }
-      // Key event handler for global spacebar
-      KeyEventHandlingView {
-        if !hotkeyFieldFocused {
-          handleGlobalSpacebar()
+        .onDisappear {
+          hotkeyMonitor.stopMonitoring()
         }
-      }
-      .frame(width: 0, height: 0)
-      .allowsHitTesting(false)
+        .onChange(of: deleteHotkey) { newValue in
+          hotkeyMonitor.deleteKey = newValue
+        }
+        .onChange(of: keepHotkey) { newValue in
+          hotkeyMonitor.keepKey = newValue
+        }
 
       VStack(spacing: 0) {
         settingsBar
@@ -701,13 +1075,8 @@ struct ContentView: View {
                     return .ignored
                   }
                 }
-                Text(url.lastPathComponent)
-                  .font(.caption)
-                  .lineLimit(2)
-                  .truncationMode(.middle)
-                  .frame(width: playerPreviewSize, alignment: .leading)
                 if let info = fileInfo[url] {
-                  VStack(alignment: .leading, spacing: 4) {
+                  VStack(alignment: .leading, spacing: 2) {
                     Text(url.lastPathComponent)
                       .font(.headline)
                     Text("\(info.size) • \(info.duration) • \(info.resolution) • \(info.fps)")
@@ -716,7 +1085,7 @@ struct ContentView: View {
                   }
                   .frame(maxWidth: .infinity, alignment: .leading)
                   .padding(.horizontal, 16)
-                  .padding(.vertical, 8)
+                  .padding(.vertical, 2)
                   .padding(.bottom, isFolderCollectionMode ? 32 : 0)
                 }
               }
@@ -738,6 +1107,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .padding(.bottom, isFolderCollectionMode ? 60 : 0)
         .background(.ultraThinMaterial)
       }
       if isLoadingThumbnails {
@@ -834,17 +1204,28 @@ struct ContentView: View {
   // MARK: — Video Playback
   private func prepareCurrentVideo() async {
     stopPlayback()
-    guard currentIndex < videoURLs.count else { return }
-
+    guard currentIndex < videoURLs.count else {
+      print(
+        "[Cullr] prepareCurrentVideo: currentIndex (", currentIndex,
+        ") out of bounds (videoURLs.count = ", videoURLs.count, ")")
+      return
+    }
     let url = videoURLs[currentIndex]
+    print("[Cullr] prepareCurrentVideo: Using url at index", currentIndex, ":", url.path)
+    guard FileManager.default.fileExists(atPath: url.path) else {
+      print("[Cullr] prepareCurrentVideo: File does not exist at", url.path)
+      return
+    }
     let asset = AVURLAsset(url: url)
     let item = AVPlayerItem(asset: asset)
-
     await MainActor.run {
       player = AVPlayer(playerItem: item)
       player?.isMuted = isMuted
       if playbackMode == .single {
         player?.play()
+      }
+      if player == nil {
+        print("[Cullr] prepareCurrentVideo: Failed to create AVPlayer for", url.path)
       }
     }
   }
@@ -856,14 +1237,54 @@ struct ContentView: View {
 
   // MARK: — Process Selected Files
   private func processSelectedFiles(selected: Set<URL>) async {
-    guard let folder = folderURL, folderAccessing else { return }
+    print("processSelectedFiles called with \(selected.count) files")
+    guard let folder = folderURL else {
+      print("processSelectedFiles: no folderURL")
+      return
+    }
+
+    var failedFiles: [String] = []
+
     for url in selected {
+      print("processSelectedFiles: Attempting to delete \(url.lastPathComponent)")
+      print(
+        "processSelectedFiles: File exists: \(FileManager.default.fileExists(atPath: url.path))")
+
+      // Try to access the security scoped resource if needed
+      let accessing = url.startAccessingSecurityScopedResource()
+      defer {
+        if accessing {
+          url.stopAccessingSecurityScopedResource()
+        }
+      }
+
       do {
         try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        print("processSelectedFiles: Successfully moved to trash: \(url.lastPathComponent)")
       } catch {
-        try? FileManager.default.removeItem(at: url)
+        print("processSelectedFiles: Failed to trash, trying direct removal: \(error)")
+        do {
+          try FileManager.default.removeItem(at: url)
+          print("processSelectedFiles: Successfully removed: \(url.lastPathComponent)")
+        } catch {
+          print("processSelectedFiles: Failed to remove: \(error)")
+          failedFiles.append(url.lastPathComponent)
+        }
       }
     }
+
+    // Show alert for failed deletions
+    if !failedFiles.isEmpty {
+      await MainActor.run {
+        let alert = NSAlert()
+        alert.messageText = "Some Files Could Not Be Deleted"
+        alert.informativeText = "Failed to delete: \(failedFiles.joined(separator: ", "))"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
+      }
+    }
+
     loadVideos(from: folder)
     selectedURLs.removeAll()
   }
@@ -1084,16 +1505,56 @@ struct ContentView: View {
 
   // MARK: — Actions
   private func deleteCurrentVideo() {
-    guard currentIndex < videoURLs.count,
-      let folder = folderURL,
-      folderAccessing
-    else { return }
+    print("deleteCurrentVideo called")
+    print("currentIndex: \(currentIndex), videoURLs.count: \(videoURLs.count)")
+    print("folderURL: \(String(describing: folderURL))")
+    print("folderAccessing: \(folderAccessing)")
+
+    guard currentIndex < videoURLs.count else {
+      print("deleteCurrentVideo: currentIndex out of bounds")
+      return
+    }
+
+    guard let folder = folderURL else {
+      print("deleteCurrentVideo: no folderURL")
+      return
+    }
 
     let url = videoURLs[currentIndex]
+    print("deleteCurrentVideo: Attempting to delete \(url.lastPathComponent)")
+    print("deleteCurrentVideo: File exists: \(FileManager.default.fileExists(atPath: url.path))")
+    print("deleteCurrentVideo: File path: \(url.path)")
+
+    // Try to access the security scoped resource if needed
+    let accessing = url.startAccessingSecurityScopedResource()
+    defer {
+      if accessing {
+        url.stopAccessingSecurityScopedResource()
+      }
+    }
+
     do {
       try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+      print("deleteCurrentVideo: Successfully moved to trash: \(url.lastPathComponent)")
     } catch {
-      try? FileManager.default.removeItem(at: url)
+      print("deleteCurrentVideo: Failed to trash, trying direct removal: \(error)")
+      do {
+        try FileManager.default.removeItem(at: url)
+        print("deleteCurrentVideo: Successfully removed: \(url.lastPathComponent)")
+      } catch {
+        print("deleteCurrentVideo: Failed to remove: \(error)")
+        // Show an alert to the user
+        DispatchQueue.main.async {
+          let alert = NSAlert()
+          alert.messageText = "Failed to Delete File"
+          alert.informativeText =
+            "Could not delete \(url.lastPathComponent): \(error.localizedDescription)"
+          alert.alertStyle = .warning
+          alert.addButton(withTitle: "OK")
+          alert.runModal()
+        }
+        return
+      }
     }
 
     Task {
@@ -1167,60 +1628,80 @@ struct ContentView: View {
     VStack(spacing: 0) {
       if currentIndex < videoURLs.count {
         let url = videoURLs[currentIndex]
-        if playbackType == .speed {
-          SingleSpeedPlayerFill(
-            url: url,
-            speedOption: speedOption,
-            isMuted: isMuted
-          )
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .aspectRatio(16 / 9, contentMode: .fit)
-          .id(url)  // Force view recreation when URL changes
-        } else {
-          SingleClipLoopingPlayerFill(
-            url: url,
-            numberOfClips: numberOfClips,
-            clipLength: clipLength,
-            isMuted: isMuted
-          )
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .aspectRatio(16 / 9, contentMode: .fit)
-          .id(url)  // Force view recreation when URL changes
-        }
-        if let info = fileInfo[url] {
-          VStack(alignment: .leading, spacing: 4) {
-            Text(url.lastPathComponent)
+        if !FileManager.default.fileExists(atPath: url.path) {
+          VStack {
+            Spacer()
+            Text("File does not exist: \(url.lastPathComponent)")
+              .foregroundColor(.red)
               .font(.headline)
-            Text("\(info.size) • \(info.duration) • \(info.resolution) • \(info.fps)")
-              .font(.subheadline)
-              .foregroundColor(.secondary)
+            Spacer()
           }
-          .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+          if playbackType == .speed {
+            SingleSpeedPlayerFill(
+              url: url,
+              speedOption: $speedOption,
+              isMuted: $isMuted
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .id(url)
+          } else {
+            SingleClipLoopingPlayerFill(
+              url: url,
+              numberOfClips: numberOfClips,
+              clipLength: clipLength,
+              isMuted: $isMuted
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .aspectRatio(16 / 9, contentMode: .fit)
+            .id(url)
+          }
+          if let info = fileInfo[url] {
+            VStack(alignment: .leading, spacing: 4) {
+              Text(url.lastPathComponent)
+                .font(.headline)
+              Text("\(info.size) • \(info.duration) • \(info.resolution) • \(info.fps)")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+          } else {
+            EmptyView()
+          }
+          Spacer(minLength: 0)
+          HStack {
+            Button {
+              deleteCurrentVideo()
+            } label: {
+              Label("Delete", systemImage: "trash")
+            }
+            .keyboardShortcut(KeyEquivalent(deleteHotkey.lowercased().first ?? "d"))
+            .buttonStyle(.bordered)
+            Spacer()
+            Button {
+              skipCurrentVideo()
+            } label: {
+              Label("Keep", systemImage: "checkmark.circle")
+            }
+            .keyboardShortcut(KeyEquivalent(keepHotkey.lowercased().first ?? "k"))
+            .buttonStyle(.borderedProminent)
+          }
           .padding(.horizontal, 16)
-          .padding(.vertical, 8)
-          .padding(.bottom, isFolderCollectionMode ? 32 : 0)
+          .padding(.vertical, 12)
+          .padding(.bottom, isFolderCollectionMode ? 60 : 0)
+          .background(.ultraThinMaterial)
         }
-        Spacer(minLength: 0)
-        HStack {
-          Button {
-            deleteCurrentVideo()
-          } label: {
-            Label("Delete", systemImage: "trash")
-          }
-          .keyboardShortcut(KeyEquivalent(deleteHotkey.lowercased().first ?? "d"))
-          .buttonStyle(.bordered)
+      } else {
+        VStack {
           Spacer()
-          Button {
-            skipCurrentVideo()
-          } label: {
-            Label("Keep", systemImage: "checkmark.circle")
-          }
-          .keyboardShortcut(KeyEquivalent(keepHotkey.lowercased().first ?? "k"))
-          .buttonStyle(.borderedProminent)
+          Text("No video at current index (\(currentIndex)).")
+            .foregroundColor(.red)
+            .font(.headline)
+          Spacer()
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(.ultraThinMaterial)
       }
     }
   }
@@ -1230,7 +1711,7 @@ struct ContentView: View {
     let url: URL
     let numberOfClips: Int
     let clipLength: Int
-    let isMuted: Bool
+    @Binding var isMuted: Bool
     @State private var player: AVPlayer? = nil
     @State private var startTimes: [Double] = []
     @State private var currentClip: Int = 0
@@ -1247,49 +1728,38 @@ struct ContentView: View {
     @State private var lastSeekTime: Double = 0
 
     var body: some View {
-      ZStack {
-        if showFallback {
-          VideoPlayer(player: player)
-            .aspectRatio(16 / 9, contentMode: .fit)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .cornerRadius(12)
+      Group {
+        if showFallback || errorMessage != nil {
+          VideoFallbackView(
+            url: url,
+            errorMessage: errorMessage ?? "Unknown error"
+          )
         } else if let player = player, !startTimes.isEmpty {
-          VideoPlayer(player: player)
+          CustomVideoPlayerWithControls(
+            player: player,
+            mode: .clips,
+            onPreviousClip: previousClip,
+            onNextClip: nextClip,
+            globalIsMuted: $isMuted
+          )
+          .aspectRatio(16 / 9, contentMode: .fit)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .cornerRadius(12)
+          .onAppear {
+            if !didAppear {
+              startLoopingClips()
+              didAppear = true
+            }
+          }
+          .onDisappear {
+            stopLoopingClips()
+            didAppear = false
+          }
+        } else {
+          Color.black
             .aspectRatio(16 / 9, contentMode: .fit)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .cornerRadius(12)
-            .onAppear {
-              if !didAppear {
-                startLoopingClips()
-                didAppear = true
-              }
-            }
-            .onDisappear {
-              stopLoopingClips()
-              didAppear = false
-            }
-        }
-        if let errorMessage = errorMessage {
-          VStack {
-            Spacer()
-            HStack {
-              Spacer()
-              VStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle")
-                  .font(.system(size: 32))
-                  .foregroundColor(.red)
-                Text(errorMessage)
-                  .foregroundColor(.red)
-                  .font(.headline)
-                  .multilineTextAlignment(.center)
-              }
-              .padding()
-              .background(Color.black.opacity(0.8))
-              .cornerRadius(12)
-              Spacer()
-            }
-            Spacer()
-          }
         }
       }
       .onAppear {
@@ -1301,69 +1771,20 @@ struct ContentView: View {
     }
 
     private func setupPlayer() {
-      let asset = AVURLAsset(url: url)
-      asset.loadValuesAsynchronously(forKeys: ["duration"]) {
+      do {
+        let asset = AVURLAsset(url: url)
         let d = asset.duration.seconds
         let times = computeStartTimes(duration: d, count: numberOfClips)
-        DispatchQueue.main.async {
-          duration = d
-          startTimes = times
-          let item = AVPlayerItem(asset: asset)
-          let newPlayer = AVPlayer(playerItem: item)
-          newPlayer.isMuted = isMuted
-          newPlayer.actionAtItemEnd = .none
-          player = newPlayer
-
-          // Add periodic time observer for debugging
-          let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
-          periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
-            forInterval: interval, queue: .main
-          ) { time in
-          }
-
-          // Observe player status
-          NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemFailedToPlayToEndTime, object: item, queue: .main
-          ) { note in
-            errorMessage = "Failed to play video."
-            showFallback = true
-          }
-          NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemNewErrorLogEntry, object: item, queue: .main
-          ) { note in
-            errorMessage = "Playback error: \(String(describing: item.error?.localizedDescription))"
-            showFallback = true
-          }
-
-          // Observe seeking (only for significant time jumps)
-          NotificationCenter.default.addObserver(
-            forName: .AVPlayerItemTimeJumped, object: item, queue: .main
-          ) { note in
-            let currentTime = newPlayer.currentTime().seconds
-            // Only consider it user interaction if:
-            // 1. The time jump is significant (> 1 second)
-            // 2. We're not in the initialization phase
-            // 3. We're not currently seeking
-            // 4. We're not already stopping
-            // 5. The time jump wasn't caused by our own clip transition
-            let isOurSeek = abs(currentTime - startTimes[currentClip]) < 0.1
-            if abs(currentTime - lastSeekTime) > 1.0 && !isInitializing && !isSeeking && !isStopping
-              && !isOurSeek
-            {
-              isStopping = true
-              isUserControlling = true
-              stopLoopingClips()
-              isStopping = false
-            }
-            lastSeekTime = currentTime
-          }
-
-          startLoopingClips()
-          // Mark initialization as complete after a short delay
-          DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-            isInitializing = false
-          }
-        }
+        duration = d
+        startTimes = times
+        let item = AVPlayerItem(asset: asset)
+        let newPlayer = AVPlayer(playerItem: item)
+        newPlayer.isMuted = isMuted
+        newPlayer.actionAtItemEnd = .none
+        player = newPlayer
+      } catch {
+        errorMessage = "Failed to initialize video player: \(error.localizedDescription)"
+        showFallback = false
       }
     }
 
@@ -1399,6 +1820,55 @@ struct ContentView: View {
         // Start playback
         player.play()
       }
+    }
+
+    private func findClosestClipIndex(to currentTime: Double) -> Int {
+      guard !startTimes.isEmpty else { return 0 }
+
+      var closestIndex = 0
+      var smallestDistance = abs(startTimes[0] - currentTime)
+
+      for (index, startTime) in startTimes.enumerated() {
+        let distance = abs(startTime - currentTime)
+        if distance < smallestDistance {
+          smallestDistance = distance
+          closestIndex = index
+        }
+      }
+
+      return closestIndex
+    }
+
+    private func previousClip() {
+      guard !startTimes.isEmpty, let player = player else { return }
+
+      let currentTime = player.currentTime().seconds
+      let closestIndex = findClosestClipIndex(to: currentTime)
+
+      // If we're at the first clip, go to the last one
+      if closestIndex == 0 {
+        currentClip = startTimes.count - 1
+      } else {
+        currentClip = closestIndex - 1
+      }
+
+      playClip(index: currentClip)
+    }
+
+    private func nextClip() {
+      guard !startTimes.isEmpty, let player = player else { return }
+
+      let currentTime = player.currentTime().seconds
+      let closestIndex = findClosestClipIndex(to: currentTime)
+
+      // If we're at the last clip, go to the first one
+      if closestIndex >= startTimes.count - 1 {
+        currentClip = 0
+      } else {
+        currentClip = closestIndex + 1
+      }
+
+      playClip(index: currentClip)
     }
 
     private func cleanup() {
@@ -1502,7 +1972,6 @@ struct ContentView: View {
           .frame(maxWidth: .infinity, alignment: .leading)
           .padding(.horizontal, 16)
           .padding(.vertical, 8)
-          .padding(.bottom, isFolderCollectionMode ? 32 : 0)
         }
         Spacer(minLength: 0)
         HStack {
@@ -1524,6 +1993,7 @@ struct ContentView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .padding(.bottom, isFolderCollectionMode ? 60 : 0)
         .background(.ultraThinMaterial)
       }
     }
@@ -1626,6 +2096,7 @@ struct ContentView: View {
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
+            .padding(.bottom, isFolderCollectionMode ? 60 : 0)
             .background(.ultraThinMaterial)
           }
         }
@@ -1861,7 +2332,7 @@ struct VideoPreviewView: View {
 
   var body: some View {
     if let player = player {
-      VideoPlayer(player: player)
+      CustomVideoPlayerView(player: player)
         .frame(width: 120, height: 80)
         .cornerRadius(6)
     } else {
@@ -1966,24 +2437,13 @@ struct VideoPlayerView: View {
 
   var body: some View {
     ZStack {
-      if #available(macOS 12.0, *) {
-        VideoPlayer(player: player)
-          .onAppear {
-            preparePlayer()
-          }
-          .onDisappear {
-            cleanup()
-          }
-      } else {
-        // Fallback for older macOS versions
-        Color.black
-          .onAppear {
-            preparePlayer()
-          }
-          .onDisappear {
-            cleanup()
-          }
-      }
+      CustomVideoPlayerView(player: player)
+        .onAppear {
+          preparePlayer()
+        }
+        .onDisappear {
+          cleanup()
+        }
 
       if !isReady {
         ProgressView()
@@ -2367,24 +2827,26 @@ struct VideoClipPreview: View {
   let isMuted: Bool
   @State private var player: AVPlayer? = nil
   var body: some View {
-    if let player = player {
-      NoControlsPlayerView(player: player)
-        .onAppear {
-          player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-          player.play()
-        }
-        .onDisappear {
-          player.pause()
-        }
-    } else {
-      Color.black
-        .onAppear {
-          let asset = AVURLAsset(url: url)
-          let item = AVPlayerItem(asset: asset)
-          let newPlayer = AVPlayer(playerItem: item)
-          newPlayer.isMuted = isMuted
-          player = newPlayer
-        }
+    Group {
+      if let player = player {
+        NoControlsPlayerView(player: player)
+          .onAppear {
+            player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+            player.play()
+          }
+          .onDisappear {
+            player.pause()
+          }
+      } else {
+        Color.black
+          .onAppear {
+            let asset = AVURLAsset(url: url)
+            let item = AVPlayerItem(asset: asset)
+            let newPlayer = AVPlayer(playerItem: item)
+            newPlayer.isMuted = isMuted
+            player = newPlayer
+          }
+      }
     }
   }
 }
@@ -2793,7 +3255,6 @@ struct NoControlsPlayerView: NSViewRepresentable {
   let player: AVPlayer
 
   func makeNSView(context: Context) -> NSView {
-    print("NoControlsPlayerView: Creating new player view")
     let view = NSView()
     let playerLayer = AVPlayerLayer(player: player)
     playerLayer.videoGravity = .resizeAspectFill
@@ -2801,14 +3262,6 @@ struct NoControlsPlayerView: NSViewRepresentable {
     view.layer = playerLayer
     view.wantsLayer = true
     playerLayer.needsDisplayOnBoundsChange = true
-
-    // Add rate observer
-    let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
-    let observer = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { time in
-      print("NoControlsPlayerView: Current rate: \(player.rate), Time: \(time.seconds)")
-    }
-    context.coordinator.rateObserver = observer
-
     return view
   }
 
@@ -2816,27 +3269,12 @@ struct NoControlsPlayerView: NSViewRepresentable {
     if let playerLayer = nsView.layer as? AVPlayerLayer {
       playerLayer.player = player
       playerLayer.frame = nsView.bounds
-
-      // Force rate update
-      let currentRate = player.rate
-      print("NoControlsPlayerView update: Current rate: \(currentRate)")
-      if currentRate != 0.0 {
-        player.rate = currentRate
-      }
     }
   }
 
-  func makeCoordinator() -> Coordinator {
-    Coordinator()
-  }
-
-  class Coordinator {
-    var rateObserver: Any?
-
-    deinit {
-      if let observer = rateObserver {
-        NotificationCenter.default.removeObserver(observer)
-      }
+  static func dismantleNSView(_ nsView: NSView, coordinator: ()) {
+    if let playerLayer = nsView.layer as? AVPlayerLayer {
+      playerLayer.player = nil
     }
   }
 }
@@ -2846,8 +3284,8 @@ struct NoControlsPlayerView: NSViewRepresentable {
 // MARK: — Single Speed Player Fill
 struct SingleSpeedPlayerFill: View {
   let url: URL
-  let speedOption: SpeedOption
-  let isMuted: Bool
+  @Binding var speedOption: SpeedOption
+  @Binding var isMuted: Bool
   @State private var player: AVPlayer? = nil
   @State private var duration: Double = 0
   @State private var didAppear: Bool = false
@@ -2858,50 +3296,42 @@ struct SingleSpeedPlayerFill: View {
   @State private var rateObserver: Any? = nil
 
   var body: some View {
-    ZStack {
-      if showFallback {
-        VideoPlayer(player: player)
-          .aspectRatio(16 / 9, contentMode: .fit)
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .cornerRadius(12)
+    Group {
+      if showFallback || errorMessage != nil {
+        VideoFallbackView(
+          url: url,
+          errorMessage: errorMessage ?? "Unknown error"
+        )
       } else if let player = player {
-        VideoPlayer(player: player)
+        CustomVideoPlayerWithControls(
+          player: player,
+          mode: .speed,
+          onSpeedChange: { newSpeed in
+            speedOption = newSpeed
+            updatePlaybackSpeed()
+          },
+          currentSpeed: speedOption,
+          globalIsMuted: $isMuted
+        )
+        .aspectRatio(16 / 9, contentMode: .fit)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .cornerRadius(12)
+        .onAppear {
+          if !didAppear {
+            print("SingleSpeedPlayerFill: Starting playback with speed \(speedOption.rawValue)")
+            startSpeedPlayback()
+            didAppear = true
+          }
+        }
+        .onDisappear {
+          stopPlayback()
+          didAppear = false
+        }
+      } else {
+        Color.black
           .aspectRatio(16 / 9, contentMode: .fit)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
           .cornerRadius(12)
-          .onAppear {
-            if !didAppear {
-              print("SingleSpeedPlayerFill: Starting playback with speed \(speedOption.rawValue)")
-              startSpeedPlayback()
-              didAppear = true
-            }
-          }
-          .onDisappear {
-            stopPlayback()
-            didAppear = false
-          }
-      }
-      if let errorMessage = errorMessage {
-        VStack {
-          Spacer()
-          HStack {
-            Spacer()
-            VStack(spacing: 8) {
-              Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 32))
-                .foregroundColor(.red)
-              Text(errorMessage)
-                .foregroundColor(.red)
-                .font(.headline)
-                .multilineTextAlignment(.center)
-            }
-            .padding()
-            .background(Color.black.opacity(0.8))
-            .cornerRadius(12)
-            Spacer()
-          }
-          Spacer()
-        }
       }
     }
     .onAppear {
@@ -2909,6 +3339,9 @@ struct SingleSpeedPlayerFill: View {
     }
     .onDisappear {
       cleanup()
+    }
+    .onChange(of: speedOption) { _ in
+      updatePlaybackSpeed()
     }
   }
 
@@ -2933,12 +3366,14 @@ struct SingleSpeedPlayerFill: View {
           )
         }
 
-        // Add rate observer
+        // Add rate observer (but don't interfere with intentional pausing)
         rateObserver = newPlayer.addPeriodicTimeObserver(
           forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
           queue: .main
         ) { _ in
-          if newPlayer.rate != Float(speedOption.rawValue) {
+          // Only restore rate if it's not intentionally paused (rate = 0)
+          // and if it's not the expected speed rate
+          if newPlayer.rate != 0 && newPlayer.rate != Float(speedOption.rawValue) {
             print(
               "SingleSpeedPlayerFill: Rate mismatch detected, forcing rate to \(speedOption.rawValue)"
             )
@@ -2964,14 +3399,17 @@ struct SingleSpeedPlayerFill: View {
           showFallback = true
         }
 
-        // Observe rate changes
+        // Observe rate changes (but don't interfere with intentional pausing)
         NotificationCenter.default.addObserver(
           forName: .AVPlayerItemTimeJumped,
           object: item,
           queue: .main
         ) { _ in
-          print("SingleSpeedPlayerFill: Time jumped, ensuring rate is \(speedOption.rawValue)")
-          newPlayer.rate = Float(speedOption.rawValue)
+          // Only restore rate if not intentionally paused
+          if newPlayer.rate != 0 {
+            print("SingleSpeedPlayerFill: Time jumped, ensuring rate is \(speedOption.rawValue)")
+            newPlayer.rate = Float(speedOption.rawValue)
+          }
         }
 
         startSpeedPlayback()
@@ -3035,6 +3473,12 @@ struct SingleSpeedPlayerFill: View {
     }
   }
 
+  private func updatePlaybackSpeed() {
+    guard let player = player else { return }
+    print("SingleSpeedPlayerFill: Updating speed to \(speedOption.rawValue)")
+    player.rate = Float(speedOption.rawValue)
+  }
+
   private func cleanup() {
     stopPlayback()
     player = nil
@@ -3057,14 +3501,14 @@ struct SpeedClipPreview: View {
   @State private var rateObserver: Any? = nil
 
   var body: some View {
-    ZStack {
-      if showFallback {
-        VideoPlayer(player: player)
-          .aspectRatio(16 / 9, contentMode: .fit)
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .cornerRadius(12)
+    Group {
+      if showFallback || errorMessage != nil {
+        VideoFallbackView(
+          url: url,
+          errorMessage: errorMessage ?? "Unknown error"
+        )
       } else if let player = player {
-        VideoPlayer(player: player)
+        CustomVideoPlayerView(player: player)
           .aspectRatio(16 / 9, contentMode: .fit)
           .frame(maxWidth: .infinity, maxHeight: .infinity)
           .cornerRadius(12)
@@ -3079,28 +3523,11 @@ struct SpeedClipPreview: View {
             stopPlayback()
             didAppear = false
           }
-      }
-      if let errorMessage = errorMessage {
-        VStack {
-          Spacer()
-          HStack {
-            Spacer()
-            VStack(spacing: 8) {
-              Image(systemName: "exclamationmark.triangle")
-                .font(.system(size: 32))
-                .foregroundColor(.red)
-              Text(errorMessage)
-                .foregroundColor(.red)
-                .font(.headline)
-                .multilineTextAlignment(.center)
-            }
-            .padding()
-            .background(Color.black.opacity(0.8))
-            .cornerRadius(12)
-            Spacer()
-          }
-          Spacer()
-        }
+      } else {
+        Color.black
+          .aspectRatio(16 / 9, contentMode: .fit)
+          .frame(maxWidth: .infinity, maxHeight: .infinity)
+          .cornerRadius(12)
       }
     }
     .onAppear {
@@ -3132,12 +3559,14 @@ struct SpeedClipPreview: View {
           )
         }
 
-        // Add rate observer
+        // Add rate observer (but don't interfere with intentional pausing)
         rateObserver = newPlayer.addPeriodicTimeObserver(
           forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
           queue: .main
         ) { _ in
-          if newPlayer.rate != Float(speedOption.rawValue) {
+          // Only restore rate if it's not intentionally paused (rate = 0)
+          // and if it's not the expected speed rate
+          if newPlayer.rate != 0 && newPlayer.rate != Float(speedOption.rawValue) {
             print(
               "SpeedClipPreview: Rate mismatch detected, forcing rate to \(speedOption.rawValue)")
             newPlayer.rate = Float(speedOption.rawValue)
@@ -3162,14 +3591,17 @@ struct SpeedClipPreview: View {
           showFallback = true
         }
 
-        // Observe rate changes
+        // Observe rate changes (but don't interfere with intentional pausing)
         NotificationCenter.default.addObserver(
           forName: .AVPlayerItemTimeJumped,
           object: item,
           queue: .main
         ) { _ in
-          print("SpeedClipPreview: Time jumped, ensuring rate is \(speedOption.rawValue)")
-          newPlayer.rate = Float(speedOption.rawValue)
+          // Only restore rate if not intentionally paused
+          if newPlayer.rate != 0 {
+            print("SpeedClipPreview: Time jumped, ensuring rate is \(speedOption.rawValue)")
+            newPlayer.rate = Float(speedOption.rawValue)
+          }
         }
 
         startSpeedPlayback()
