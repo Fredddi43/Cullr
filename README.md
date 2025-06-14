@@ -59,9 +59,9 @@ Cullr is a modern, native macOS app for quickly previewing, sorting, and batch-m
    - **Right-click (or Control-click) the app** and choose **Open**. In the dialog that appears, click **Open** again. (You only need to do this the first time.)
    - **Or,** run this command in Terminal:
      ```sh
-     xattr -dr com.apple.quarantine /path/to/Cullr.app
+     xattr -dr com.apple.quarantine /Applications/Cullr.app
      ```
-     Replace `/path/to/Cullr.app` with the actual path to the app.
+     Replace `/Applications/Cullr.app` with the actual path to the app, if it differs.
 
 ---
 
