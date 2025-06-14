@@ -48,6 +48,21 @@ Cullr is a modern, native macOS app for quickly previewing, sorting, and batch-m
 ### 2. (Optional) Download Prebuilt Release
 - [Releases](https://github.com/yourusername/Cullr/releases) (if available)
 
+#### How to Download and Run the Prebuilt App
+
+1. Download the latest `.zip` file from the [Releases](https://github.com/yourusername/Cullr/releases) page.
+2. Unzip it to extract `Cullr.app`.
+3. If you see a message like:
+   > “Cullr.app” cannot be opened because it is from an unidentified developer.
+   
+   Do one of the following:
+   - **Right-click (or Control-click) the app** and choose **Open**. In the dialog that appears, click **Open** again. (You only need to do this the first time.)
+   - **Or,** run this command in Terminal:
+     ```sh
+     xattr -dr com.apple.quarantine /path/to/Cullr.app
+     ```
+     Replace `/path/to/Cullr.app` with the actual path to the app.
+
 ---
 
 ## 🚀 Usage
@@ -103,4 +118,4 @@ Cullr is licensed under the GNU General Public License v3.0 (GPL-3.0).
 
 <p align="center">
   <i>Cullr is not affiliated with Apple Inc.</i>
-</p> 
+</p>
