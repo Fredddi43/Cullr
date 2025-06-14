@@ -101,7 +101,7 @@ Cullr is a modern, native macOS app for quickly previewing, sorting, and batch-m
 
 ## 🙏 Credits
 
-- App icon and UI by [Your Name]
+- App icon and UI by Friedemann Lipphardt
 - Built with ❤️ for the Mac community
 
 ---
