@@ -707,10 +707,17 @@ struct ContentView: View {
                   .truncationMode(.middle)
                   .frame(width: playerPreviewSize, alignment: .leading)
                 if let info = fileInfo[url] {
-                  Text("\(info.size) • \(info.duration)")
-                    .font(.caption2)
-                    .foregroundColor(.secondary)
-                    .frame(width: playerPreviewSize, alignment: .leading)
+                  VStack(alignment: .leading, spacing: 4) {
+                    Text(url.lastPathComponent)
+                      .font(.headline)
+                    Text("\(info.size) • \(info.duration) • \(info.resolution) • \(info.fps)")
+                      .font(.subheadline)
+                      .foregroundColor(.secondary)
+                  }
+                  .frame(maxWidth: .infinity, alignment: .leading)
+                  .padding(.horizontal, 16)
+                  .padding(.vertical, 8)
+                  .padding(.bottom, isFolderCollectionMode ? 32 : 0)
                 }
               }
             }
@@ -1191,6 +1198,7 @@ struct ContentView: View {
           .frame(maxWidth: .infinity, alignment: .leading)
           .padding(.horizontal, 16)
           .padding(.vertical, 8)
+          .padding(.bottom, isFolderCollectionMode ? 32 : 0)
         }
         Spacer(minLength: 0)
         HStack {
@@ -1494,6 +1502,7 @@ struct ContentView: View {
           .frame(maxWidth: .infinity, alignment: .leading)
           .padding(.horizontal, 16)
           .padding(.vertical, 8)
+          .padding(.bottom, isFolderCollectionMode ? 32 : 0)
         }
         Spacer(minLength: 0)
         HStack {
