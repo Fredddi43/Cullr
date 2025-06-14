@@ -69,6 +69,7 @@ enum SortOption: String, CaseIterable, Identifiable {
   case dateAdded = "Date Added"
   case dateModified = "Date Modified"
   case size = "Size"
+  case duration = "Video Length"  // <-- Add this
 
   var id: String { self.rawValue }
 }
@@ -555,6 +556,27 @@ struct ContentView: View {
         let size1 = (try? fm.attributesOfItem(atPath: url1.path)[.size] as? UInt64) ?? 0
         let size2 = (try? fm.attributesOfItem(atPath: url2.path)[.size] as? UInt64) ?? 0
         result = size1 < size2
+      case .duration:
+        // Use fileInfo if available, otherwise fallback to AVAsset
+        let duration1: Double = {
+          if let info = fileInfo[url1], let min = ContentView.durationInSeconds(from: info.duration)
+          {
+            return min
+          } else {
+            let asset = AVAsset(url: url1)
+            return asset.duration.seconds
+          }
+        }()
+        let duration2: Double = {
+          if let info = fileInfo[url2], let min = ContentView.durationInSeconds(from: info.duration)
+          {
+            return min
+          } else {
+            let asset = AVAsset(url: url2)
+            return asset.duration.seconds
+          }
+        }()
+        result = duration1 < duration2
       }
       return sortAscending ? result : !result
     }
@@ -572,7 +594,7 @@ struct ContentView: View {
                   Text(option.rawValue).tag(option)
                 }
               }
-              .frame(width: 120)
+              .frame(width: 180)
 
               Button(action: { sortAscending.toggle() }) {
                 Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
@@ -1511,7 +1533,7 @@ struct ContentView: View {
                     Text(option.rawValue).tag(option)
                   }
                 }
-                .frame(width: 120)
+                .frame(width: 180)
 
                 Button(action: { sortAscending.toggle() }) {
                   Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
@@ -1742,6 +1764,13 @@ struct ContentView: View {
       .padding(.trailing, 0)
       .padding(.top, compact ? 0 : 4)
     }
+  }
+
+  // Add this helper to ContentView for parsing duration string (e.g., "3:15") to seconds
+  static func durationInSeconds(from durationString: String) -> Double? {
+    let parts = durationString.split(separator: ":").map { Double($0) ?? 0 }
+    guard parts.count == 2 else { return nil }
+    return parts[0] * 60 + parts[1]
   }
 }
 

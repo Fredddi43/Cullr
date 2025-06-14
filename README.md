@@ -93,7 +93,11 @@ Cullr is a modern, native macOS app for quickly previewing, sorting, and batch-m
 
 ## 📄 License
 
-MIT License. See [LICENSE](LICENSE) for details.
+Cullr is licensed under the GNU General Public License v3.0 (GPL-3.0).
+
+- You **may not sell** this software or any derivative works.
+- You **must** distribute source code and modifications under the same license (copyleft).
+- See the full license text in [LICENSE](LICENSE).
 
 ---
 
