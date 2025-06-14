@@ -203,6 +203,11 @@ struct ContentView: View {
   // Add this to ContentView state:
   @State private var viewReloadID = UUID()
 
+  // Add to ContentView state:
+  @State private var folderCollection: [URL] = []
+  @State private var currentFolderIndex: Int = 0
+  private var isFolderCollectionMode: Bool { folderCollection.count > 1 }
+
   var body: some View {
     ZStack {
       Color.clear
@@ -276,8 +281,70 @@ struct ContentView: View {
           }
         )
       }
+
+      // Folder Collection Bottom Bar
+      if isFolderCollectionMode {
+        VStack {
+          Spacer()
+          HStack {
+            Button(action: previousFolder) {
+              Image(systemName: "chevron.left")
+              Text("Previous")
+            }
+            .disabled(currentFolderIndex == 0)
+            Spacer()
+            Text(folderURL?.lastPathComponent ?? "")
+              .font(.headline)
+            Spacer()
+            Text("\(currentFolderIndex + 1) / \(folderCollection.count)")
+              .font(.subheadline)
+              .foregroundColor(.secondary)
+            Spacer()
+            Button(action: nextFolder) {
+              Text("Next")
+              Image(systemName: "chevron.right")
+            }
+            .disabled(currentFolderIndex >= folderCollection.count - 1)
+          }
+          .padding(.horizontal, 24)
+          .padding(.vertical, 12)
+          .background(.ultraThinMaterial)
+          .cornerRadius(12)
+          .shadow(radius: 8)
+          .padding(.bottom, 12)
+        }
+        .transition(.move(edge: .bottom))
+        .zIndex(10)
+      }
     }
     .frame(minWidth: 1200, minHeight: 800)
+  }
+
+  // Folder navigation actions
+  private func nextFolder() {
+    guard currentFolderIndex < folderCollection.count - 1 else { return }
+    currentFolderIndex += 1
+    folderURL = folderCollection[currentFolderIndex]
+    if folderURL!.startAccessingSecurityScopedResource() {
+      folderAccessing = true
+    }
+    loadVideosAndThumbnails(from: folderURL!)
+    if let window = NSApplication.shared.windows.first {
+      window.title = folderURL!.lastPathComponent
+    }
+  }
+
+  private func previousFolder() {
+    guard currentFolderIndex > 0 else { return }
+    currentFolderIndex -= 1
+    folderURL = folderCollection[currentFolderIndex]
+    if folderURL!.startAccessingSecurityScopedResource() {
+      folderAccessing = true
+    }
+    loadVideosAndThumbnails(from: folderURL!)
+    if let window = NSApplication.shared.windows.first {
+      window.title = folderURL!.lastPathComponent
+    }
   }
 
   // MARK: — Spacebar Handler
@@ -775,24 +842,71 @@ struct ContentView: View {
   // MARK: — Folder Selection
   private func selectFolder() {
     let panel = NSOpenPanel()
-    panel.title = "Choose a folder containing video files"
+    panel.title = "Choose folder(s) containing video files"
     panel.canChooseDirectories = true
     panel.canChooseFiles = false
-    panel.allowsMultipleSelection = false
+    panel.allowsMultipleSelection = true
     panel.allowedContentTypes = [.folder]
     panel.begin { response in
-      if response == .OK, let url = panel.url {
-        relinquishFolderAccess()
-        folderURL = url
-        isPrepared = false
-        playbackMode = .folderView  // Reset to folder view mode
-
-        if url.startAccessingSecurityScopedResource() {
-          folderAccessing = true
-          loadVideosAndThumbnails(from: url)
-        }
-        if let window = NSApplication.shared.windows.first {
-          window.title = url.lastPathComponent
+      if response == .OK {
+        let urls = panel.urls
+        if urls.count > 1 {
+          // Multiple folders selected
+          folderCollection = urls
+          currentFolderIndex = 0
+          folderURL = folderCollection.first
+          isPrepared = false
+          if folderURL!.startAccessingSecurityScopedResource() {
+            folderAccessing = true
+            loadVideosAndThumbnails(from: folderURL!)
+          }
+          if let window = NSApplication.shared.windows.first {
+            window.title = folderURL!.lastPathComponent
+          }
+        } else if let url = urls.first {
+          // Single folder selected: scan for subfolders
+          let fm = FileManager.default
+          var subfolders: [URL] = []
+          if let contents = try? fm.contentsOfDirectory(
+            at: url, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
+          {
+            subfolders = contents.filter {
+              (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            }.sorted {
+              $0.lastPathComponent.localizedCaseInsensitiveCompare($1.lastPathComponent)
+                == .orderedAscending
+            }
+          }
+          if subfolders.isEmpty {
+            // No subfolders, just open the folder
+            folderCollection = [url]
+            currentFolderIndex = 0
+            folderURL = url
+            isPrepared = false
+            if url.startAccessingSecurityScopedResource() {
+              folderAccessing = true
+              loadVideosAndThumbnails(from: url)
+            }
+            if let window = NSApplication.shared.windows.first {
+              window.title = url.lastPathComponent
+            }
+          } else {
+            // Check for video files in root
+            let allowedExtensions = ["mp4", "mov", "m4v", "avi", "mpg", "mpeg"]
+            let rootVideos =
+              (try? fm.contentsOfDirectory(
+                at: url, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]))?.filter {
+                allowedExtensions.contains($0.pathExtension.lowercased())
+              } ?? []
+            folderCollection = rootVideos.isEmpty ? subfolders : [url] + subfolders
+            currentFolderIndex = 0
+            folderURL = folderCollection.first
+            isPrepared = false
+            loadVideosAndThumbnails(from: folderURL!)
+            if let window = NSApplication.shared.windows.first {
+              window.title = folderURL!.lastPathComponent
+            }
+          }
         }
       } else {
         if let window = NSApplication.shared.windows.first {
@@ -865,15 +979,14 @@ struct ContentView: View {
       tempClipLength = clipLength
 
       // Pre-generate all thumbnails for all files and clips
-      let allClipTimes: [(URL, [Double])] = videoURLs.map { url in
-        if playbackType == .speed {
-          // For speed mode, only generate one thumbnail at 2% offset
-          return (url, [0.02])
-        } else {
-          // For clips mode, generate thumbnails for all clips
+      let allClipTimes: [(URL, [Double])]
+      if playbackType == .clips {
+        allClipTimes = videoURLs.map { url in
           let times = [0.02] + getClipTimes(for: url, count: numberOfClips)
           return (url, times)
         }
+      } else {
+        allClipTimes = videoURLs.map { url in (url, [0.02]) }
       }
       thumbnailsToLoad = allClipTimes.reduce(0) { $0 + $1.1.count }
       thumbnailsLoaded = 0
