@@ -45,8 +45,8 @@ Cullr is a modern, native macOS app for quickly previewing, sorting, and batch-m
 
 > **Note:** Cullr requires macOS 13.0+ and Xcode 14+.
 
-### 2. (Optional) Download Prebuilt Release
-- [Releases](https://github.com/yourusername/Cullr/releases) (if available)
+### 2. Download Prebuilt Release
+- [Releases](https://github.com/yourusername/Cullr/releases)
 
 #### How to Download and Run the Prebuilt App
 
