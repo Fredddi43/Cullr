@@ -2165,13 +2165,14 @@ struct HoverPreviewCard: View {
   var playbackType: PlaybackType
   var speedOption: SpeedOption
   @State private var player: AVPlayer? = nil
-  @State private var isPlayerReady: Bool = false
-  @State private var playbackEndObserver: NSObjectProtocol? = nil
   @State private var duration: Double = 0
+  @State private var periodicTimeObserver: Any? = nil
+  @State private var rateObserver: NSObjectProtocol? = nil
+  @State private var playbackEndObserver: NSObjectProtocol? = nil
+  @State private var pendingSpeedPlayback: Bool = false
 
   var body: some View {
     ZStack {
-      // Always show the static thumbnail as the background
       if let thumbnail = thumbnail {
         thumbnail
           .resizable()
@@ -2179,17 +2180,22 @@ struct HoverPreviewCard: View {
       } else {
         Color.black
       }
-      // Overlay the video player if forcePlay is true and player is ready
-      if forcePlay {
+      if forcePlay && playbackType == .speed, let player = player {
+        NoControlsPlayerView(player: player)
+          .onAppear {
+            // Always recreate the player on hover-in
+            playerCleanup()
+            setupPlayer()
+          }
+          .onDisappear {
+            stopPlayback()
+          }
+      } else if forcePlay && playbackType == .clips {
         if let player = player {
           NoControlsPlayerView(player: player)
             .onAppear {
-              if playbackType == .clips {
-                player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-                player.play()
-              } else {
-                startSpeedPlayback(player: player)
-              }
+              player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+              player.play()
             }
             .onDisappear {
               stopPlayback()
@@ -2197,77 +2203,119 @@ struct HoverPreviewCard: View {
         } else {
           Color.clear
             .onAppear {
-              if player == nil {
-                setupPlayer()
-              }
+              let asset = AVURLAsset(url: url)
+              let item = AVPlayerItem(asset: asset)
+              let newPlayer = AVPlayer(playerItem: item)
+              newPlayer.isMuted = isMuted
+              player = newPlayer
             }
         }
       }
     }
     .clipped()
+    .onChange(of: speedOption) { _ in
+      if forcePlay && playbackType == .speed {
+        playerCleanup()
+        setupPlayer()
+      }
+    }
+    .onChange(of: forcePlay) { newForcePlay in
+      if newForcePlay && playbackType == .speed {
+        playerCleanup()
+        setupPlayer()
+      } else if !newForcePlay {
+        stopPlayback()
+      }
+    }
   }
 
   private func setupPlayer() {
     let asset = AVURLAsset(url: url)
-    let item = AVPlayerItem(asset: asset)
-    let newPlayer = AVPlayer(playerItem: item)
+    let playerItem = AVPlayerItem(asset: asset)
+    let newPlayer = AVPlayer(playerItem: playerItem)
     newPlayer.isMuted = isMuted
-
-    // Load duration for speed mode
-    if playbackType == .speed {
-      asset.loadValuesAsynchronously(forKeys: ["duration"]) {
-        let d = asset.duration.seconds
-        DispatchQueue.main.async {
-          duration = d
+    player = newPlayer
+    let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+    periodicTimeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) {
+      _ in
+    }
+    rateObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemTimeJumped,
+      object: playerItem,
+      queue: .main
+    ) { _ in
+      newPlayer.rate = Float(speedOption.rawValue)
+    }
+    Task {
+      let loadedDuration = try? await asset.load(.duration)
+      await MainActor.run {
+        self.duration = loadedDuration?.seconds ?? 0
+        if forcePlay {
+          resetAndStartSpeedPlayback()
+        } else if pendingSpeedPlayback {
+          pendingSpeedPlayback = false
+          resetAndStartSpeedPlayback()
         }
       }
     }
-
-    // Observe player item status
-    NotificationCenter.default.addObserver(
-      forName: .AVPlayerItemDidPlayToEndTime,
-      object: item,
-      queue: .main
-    ) { _ in
-      if playbackType == .speed {
-        newPlayer.seek(to: .zero)
-        newPlayer.rate = Float(speedOption.rawValue)
-        newPlayer.play()
-      }
-    }
-
-    player = newPlayer
   }
 
-  private func startSpeedPlayback(player: AVPlayer) {
-    // Start at 2% of the video duration, matching the thumbnail time
+  private func resetAndStartSpeedPlayback() {
+    guard let player = player else { return }
+    guard duration > 0 else {
+      pendingSpeedPlayback = true
+      return
+    }
+    player.pause()
+    player.rate = 0
     let startTime = duration * 0.02
-    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-    player.rate = Float(speedOption.rawValue)
-    player.play()
-
-    // Add observer for playback end
+    player.seek(
+      to: CMTime(seconds: startTime, preferredTimescale: 600), toleranceBefore: .zero,
+      toleranceAfter: .zero
+    ) { _ in
+      player.rate = Float(speedOption.rawValue)
+      player.play()
+    }
+    if playbackEndObserver != nil {
+      NotificationCenter.default.removeObserver(playbackEndObserver!)
+      playbackEndObserver = nil
+    }
     playbackEndObserver = NotificationCenter.default.addObserver(
       forName: .AVPlayerItemDidPlayToEndTime,
       object: player.currentItem,
       queue: .main
     ) { _ in
-      // When video ends, seek back to 2% and continue playing
-      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-      player.rate = Float(speedOption.rawValue)
-      player.play()
+      player.seek(
+        to: CMTime(seconds: startTime, preferredTimescale: 600), toleranceBefore: .zero,
+        toleranceAfter: .zero
+      ) { _ in
+        player.rate = Float(speedOption.rawValue)
+        player.play()
+      }
     }
   }
 
   private func stopPlayback() {
-    if let player = player {
-      player.pause()
-      player.rate = 0
-    }
+    player?.pause()
+    player?.rate = 0
     if let observer = playbackEndObserver {
       NotificationCenter.default.removeObserver(observer)
       playbackEndObserver = nil
     }
+    if let observer = periodicTimeObserver {
+      player?.removeTimeObserver(observer)
+      periodicTimeObserver = nil
+    }
+    if let observer = rateObserver {
+      NotificationCenter.default.removeObserver(observer)
+      rateObserver = nil
+    }
+    pendingSpeedPlayback = false
+    player = nil
+  }
+
+  private func playerCleanup() {
+    stopPlayback()
   }
 }
 
