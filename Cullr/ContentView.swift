@@ -193,16 +193,10 @@ class GlobalHotkeyMonitor: ObservableObject {
   var keepKey: String = "k"
 
   func startMonitoring() {
-    print("GlobalHotkeyMonitor: Starting monitoring")
 
     // Local event monitor (when app is focused)
     localEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-      print(
-        "GlobalHotkeyMonitor: Local key event - keyCode: \(event.keyCode), char: '\(event.charactersIgnoringModifiers?.lowercased() ?? "")'"
-      )
-
       if self.handleKeyEvent(event) {
-        print("GlobalHotkeyMonitor: Event handled, returning nil")
         return nil  // Consume the event
       }
       return event  // Let the event continue
@@ -210,7 +204,6 @@ class GlobalHotkeyMonitor: ObservableObject {
   }
 
   func stopMonitoring() {
-    print("GlobalHotkeyMonitor: Stopping monitoring")
     if let monitor = localEventMonitor {
       NSEvent.removeMonitor(monitor)
       localEventMonitor = nil
@@ -221,15 +214,12 @@ class GlobalHotkeyMonitor: ObservableObject {
     let keyChar = event.charactersIgnoringModifiers?.lowercased() ?? ""
 
     if event.keyCode == 49 {  // Spacebar
-      print("GlobalHotkeyMonitor: Spacebar pressed")
       onSpace?()
       return true
     } else if keyChar == deleteKey.lowercased() {
-      print("GlobalHotkeyMonitor: Delete key ('\(deleteKey)') pressed")
       onDelete?()
       return true
     } else if keyChar == keepKey.lowercased() {
-      print("GlobalHotkeyMonitor: Keep key ('\(keepKey)') pressed")
       onKeep?()
       return true
     }
@@ -1391,7 +1381,6 @@ struct ContentView: View {
       playbackMode = .folderView
 
     } catch {
-      print("Error loading directory contents: \(error.localizedDescription)")
     }
   }
 
@@ -1420,7 +1409,6 @@ struct ContentView: View {
         fileInfo[url] = (size: sizeText, duration: durationText, resolution: resolution, fps: fps)
       }
     } catch {
-      print("Error loading file info for \(url.lastPathComponent): \(error.localizedDescription)")
     }
   }
 
@@ -1428,15 +1416,10 @@ struct ContentView: View {
   private func prepareCurrentVideo() async {
     stopPlayback()
     guard currentIndex < videoURLs.count else {
-      print(
-        "[Cullr] prepareCurrentVideo: currentIndex (", currentIndex,
-        ") out of bounds (videoURLs.count = ", videoURLs.count, ")")
       return
     }
     let url = videoURLs[currentIndex]
-    print("[Cullr] prepareCurrentVideo: Using url at index", currentIndex, ":", url.path)
     guard FileManager.default.fileExists(atPath: url.path) else {
-      print("[Cullr] prepareCurrentVideo: File does not exist at", url.path)
       return
     }
     let asset = AVURLAsset(url: url)
@@ -1448,7 +1431,6 @@ struct ContentView: View {
         player?.play()
       }
       if player == nil {
-        print("[Cullr] prepareCurrentVideo: Failed to create AVPlayer for", url.path)
       }
     }
   }
@@ -1491,7 +1473,6 @@ struct ContentView: View {
         }
       }
     } catch {
-      print("Error calculating folder info: \(error.localizedDescription)")
     }
 
     await MainActor.run {
@@ -1531,7 +1512,6 @@ struct ContentView: View {
         }
       }
     } catch {
-      print("Error counting files in \(url.path): \(error.localizedDescription)")
     }
 
     return (fileCount, totalSize)
@@ -1539,8 +1519,6 @@ struct ContentView: View {
 
   private func deleteFolderPermanently() async {
     guard let folder = folderPendingDeletion else { return }
-
-    print("Attempting to delete entire folder: \(folder.lastPathComponent)")
 
     // Try to access the security scoped resource if needed
     let accessing = folder.startAccessingSecurityScopedResource()
@@ -1552,7 +1530,6 @@ struct ContentView: View {
 
     do {
       try FileManager.default.trashItem(at: folder, resultingItemURL: nil)
-      print("Successfully moved folder to trash: \(folder.lastPathComponent)")
 
       await MainActor.run {
         // Check if we're deleting the parent folder (first in collection)
@@ -1602,10 +1579,8 @@ struct ContentView: View {
       }
 
     } catch {
-      print("Failed to trash folder, trying direct removal: \(error)")
       do {
         try FileManager.default.removeItem(at: folder)
-        print("Successfully removed folder: \(folder.lastPathComponent)")
 
         await MainActor.run {
           // Check if we're deleting the parent folder (first in collection)
@@ -1653,12 +1628,10 @@ struct ContentView: View {
         }
 
       } catch {
-        print("Failed to remove folder: \(error)")
         await MainActor.run {
           let alert = NSAlert()
           alert.messageText = "Failed to Delete Folder"
-          alert.informativeText =
-            "Could not delete folder \(folder.lastPathComponent): \(error.localizedDescription)"
+          alert.informativeText = "Unable to delete the folder."
           alert.alertStyle = .warning
           alert.addButton(withTitle: "OK")
           alert.runModal()
@@ -1672,18 +1645,13 @@ struct ContentView: View {
 
   // MARK: — Process Selected Files
   private func processSelectedFiles(selected: Set<URL>) async {
-    print("processSelectedFiles called with \(selected.count) files")
     guard let folder = folderURL else {
-      print("processSelectedFiles: no folderURL")
       return
     }
 
     var failedFiles: [String] = []
 
     for url in selected {
-      print("processSelectedFiles: Attempting to delete \(url.lastPathComponent)")
-      print(
-        "processSelectedFiles: File exists: \(FileManager.default.fileExists(atPath: url.path))")
 
       // Try to access the security scoped resource if needed
       let accessing = url.startAccessingSecurityScopedResource()
@@ -1695,14 +1663,10 @@ struct ContentView: View {
 
       do {
         try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-        print("processSelectedFiles: Successfully moved to trash: \(url.lastPathComponent)")
       } catch {
-        print("processSelectedFiles: Failed to trash, trying direct removal: \(error)")
         do {
           try FileManager.default.removeItem(at: url)
-          print("processSelectedFiles: Successfully removed: \(url.lastPathComponent)")
         } catch {
-          print("processSelectedFiles: Failed to remove: \(error)")
           failedFiles.append(url.lastPathComponent)
         }
       }
@@ -1885,7 +1849,6 @@ struct ContentView: View {
       //playbackMode = .folderView
 
     } catch {
-      print("Error loading directory contents: \(error.localizedDescription)")
     }
   }
 
@@ -1944,25 +1907,16 @@ struct ContentView: View {
 
   // MARK: — Actions
   private func deleteCurrentVideo() {
-    print("deleteCurrentVideo called")
-    print("currentIndex: \(currentIndex), videoURLs.count: \(videoURLs.count)")
-    print("folderURL: \(String(describing: folderURL))")
-    print("folderAccessing: \(folderAccessing)")
 
     guard currentIndex < videoURLs.count else {
-      print("deleteCurrentVideo: currentIndex out of bounds")
       return
     }
 
     guard let folder = folderURL else {
-      print("deleteCurrentVideo: no folderURL")
       return
     }
 
     let url = videoURLs[currentIndex]
-    print("deleteCurrentVideo: Attempting to delete \(url.lastPathComponent)")
-    print("deleteCurrentVideo: File exists: \(FileManager.default.fileExists(atPath: url.path))")
-    print("deleteCurrentVideo: File path: \(url.path)")
 
     // Try to access the security scoped resource if needed
     let accessing = url.startAccessingSecurityScopedResource()
@@ -1974,20 +1928,15 @@ struct ContentView: View {
 
     do {
       try FileManager.default.trashItem(at: url, resultingItemURL: nil)
-      print("deleteCurrentVideo: Successfully moved to trash: \(url.lastPathComponent)")
     } catch {
-      print("deleteCurrentVideo: Failed to trash, trying direct removal: \(error)")
       do {
         try FileManager.default.removeItem(at: url)
-        print("deleteCurrentVideo: Successfully removed: \(url.lastPathComponent)")
       } catch {
-        print("deleteCurrentVideo: Failed to remove: \(error)")
         // Show an alert to the user
         DispatchQueue.main.async {
           let alert = NSAlert()
           alert.messageText = "Failed to Delete File"
-          alert.informativeText =
-            "Could not delete \(url.lastPathComponent): \(error.localizedDescription)"
+          alert.informativeText = "An error occurred during file deletion."
           alert.alertStyle = .warning
           alert.addButton(withTitle: "OK")
           alert.runModal()
@@ -2650,8 +2599,7 @@ struct ContentView: View {
             ContentView.thumbnailCache[url] = image
             thumbnail = image
           } catch {
-            print(
-              "Error loading thumbnail for \(url.lastPathComponent): \(error.localizedDescription)")
+
           }
         }
       }
@@ -2817,7 +2765,6 @@ struct VideoThumbnailView: View {
         isLoading = false
       }
     } catch {
-      print("Error loading thumbnail for \(url.lastPathComponent): \(error.localizedDescription)")
       await MainActor.run {
         isLoading = false
       }
@@ -2912,7 +2859,6 @@ struct SideBySideClipView: View {
         player = newPlayer
       }
     } catch {
-      print("Error setting up side-by-side player: \(error.localizedDescription)")
     }
   }
 
@@ -3110,7 +3056,6 @@ struct PreviewCard: View {
       }
       return (image, false)
     } catch {
-      print("Error loading thumbnail for \(url.lastPathComponent): \(error.localizedDescription)")
       return (nil, true)
     }
   }
@@ -3190,8 +3135,7 @@ struct PreviewCard: View {
             }
           }
         } catch {
-          print(
-            "Error setting up player for \(url.lastPathComponent): \(error.localizedDescription)")
+
           await MainActor.run {
             loadError = true
           }
@@ -3310,8 +3254,7 @@ struct FolderViewPreviewCard: View {
             }
           }
         } catch {
-          print(
-            "Error setting up player for \(url.lastPathComponent): \(error.localizedDescription)")
+
           await MainActor.run {
             loadError = true
           }
@@ -3530,17 +3473,14 @@ struct HoverPreviewCard: View {
 
   private func updateSpeedPlayback() {
     guard let player = player else { return }
-    print(
-      "FolderSpeedPreview: Updating speed to \(speedOption.rawValue)x for \(url.lastPathComponent)")
+
     // Set rate and verify it took effect
     player.rate = Float(speedOption.rawValue)
 
     // Double-check after a brief delay
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
       if player.rate != Float(self.speedOption.rawValue) {
-        print(
-          "FolderSpeedPreview: Speed update correction needed, setting to \(self.speedOption.rawValue)"
-        )
+
         player.rate = Float(self.speedOption.rawValue)
       }
     }
@@ -3613,20 +3553,16 @@ struct FolderHoverLoopPreview: View {
           .cornerRadius(8)
           .opacity(fadeOpacity)
           .onAppear {
-            print("FolderHoverLoopPreview: View appeared for \(url.lastPathComponent)")
             withAnimation(.easeIn(duration: 0.2)) {
               fadeOpacity = 1.0
             }
             if playbackType == .clips {
-              print("FolderHoverLoopPreview: Starting clip looping for \(url.lastPathComponent)")
               startLoopingClips()
             } else {
-              print("FolderHoverLoopPreview: Starting speed playback for \(url.lastPathComponent)")
               startSpeedPlayback()
             }
           }
           .onDisappear {
-            print("FolderHoverLoopPreview: View disappeared for \(url.lastPathComponent)")
             withAnimation(.easeOut(duration: 0.2)) {
               fadeOpacity = 0.0
             }
@@ -3635,24 +3571,19 @@ struct FolderHoverLoopPreview: View {
       }
     }
     .onHover { hovering in
-      print(
-        "FolderHoverLoopPreview: Hover state changed to \(hovering) for \(url.lastPathComponent)")
+
       isHovered = hovering
       if hovering {
         if player == nil && isAssetReady {
-          print("FolderHoverLoopPreview: Creating player for \(url.lastPathComponent)")
           createPlayer()
         } else if player != nil {
           if playbackType == .clips {
-            print("FolderHoverLoopPreview: Restarting clip looping for \(url.lastPathComponent)")
             startLoopingClips()
           } else {
-            print("FolderHoverLoopPreview: Restarting speed playback for \(url.lastPathComponent)")
             startSpeedPlayback()
           }
         }
       } else {
-        print("FolderHoverLoopPreview: Stopping playback for \(url.lastPathComponent)")
         stopPlayback()
       }
     }
@@ -3681,8 +3612,7 @@ struct FolderHoverLoopPreview: View {
           ContentView.thumbnailCache[url] = image
           thumbnail = image
         } catch {
-          print(
-            "Error loading thumbnail for \(url.lastPathComponent): \(error.localizedDescription)")
+
         }
       }
     }
@@ -3691,7 +3621,6 @@ struct FolderHoverLoopPreview: View {
   }
 
   private func preCreateAsset() {
-    print("FolderHoverLoopPreview: Pre-creating asset for \(url.lastPathComponent)")
     asset = AVURLAsset(url: url)
 
     // Load duration in background
@@ -3702,12 +3631,8 @@ struct FolderHoverLoopPreview: View {
           self.duration = loadedDuration?.seconds ?? 0
           if playbackType == .clips && duration > 0 {
             startTimes = computeStartTimes(duration: duration, count: numberOfClips)
-            print(
-              "FolderHoverLoopPreview: Generated clip times: \(startTimes) for \(url.lastPathComponent)"
-            )
           }
           self.isAssetReady = true
-          print("FolderHoverLoopPreview: Asset ready for \(url.lastPathComponent)")
 
           // If we're hovered and waiting, create player now
           if isHovered && player == nil {
@@ -3720,7 +3645,6 @@ struct FolderHoverLoopPreview: View {
 
   private func createPlayer() {
     guard let asset = asset, isAssetReady else { return }
-    print("FolderHoverLoopPreview: Creating player for \(url.lastPathComponent)")
 
     let playerItem = AVPlayerItem(asset: asset)
     player = AVPlayer(playerItem: playerItem)
@@ -3750,15 +3674,9 @@ struct FolderHoverLoopPreview: View {
 
   private func startSpeedPlayback() {
     guard let player = player else {
-      print(
-        "FolderHoverLoopPreview: Cannot start playback - player is nil for \(url.lastPathComponent)"
-      )
       return
     }
 
-    print(
-      "FolderHoverLoopPreview: Starting speed playback at \(speedOption.rawValue)x for \(url.lastPathComponent)"
-    )
     player.rate = Float(speedOption.rawValue)
     player.seek(to: CMTime(seconds: duration * 0.02, preferredTimescale: 600))
     player.play()
@@ -3769,7 +3687,6 @@ struct FolderHoverLoopPreview: View {
       object: player.currentItem,
       queue: .main
     ) { _ in
-      print("FolderHoverLoopPreview: Playback ended for \(url.lastPathComponent)")
       player.seek(to: CMTime(seconds: duration * 0.02, preferredTimescale: 600))
       player.play()
     }
@@ -3777,29 +3694,19 @@ struct FolderHoverLoopPreview: View {
 
   private func startLoopingClips() {
     guard let player = player else {
-      print(
-        "FolderHoverLoopPreview: Cannot start clip looping - player is nil for \(url.lastPathComponent)"
-      )
       return
     }
 
-    print("FolderHoverLoopPreview: Starting clip looping for \(url.lastPathComponent)")
     currentClip = 0
     playCurrentClip()
   }
 
   private func playCurrentClip() {
     guard let player = player, !startTimes.isEmpty else {
-      print(
-        "FolderHoverLoopPreview: Cannot play clip - player is nil or no start times for \(url.lastPathComponent)"
-      )
       return
     }
 
     let startTime = startTimes[currentClip]
-    print(
-      "FolderHoverLoopPreview: Playing clip \(currentClip + 1)/\(startTimes.count) at time \(startTime) for \(url.lastPathComponent)"
-    )
 
     player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
     player.rate = 1.0
@@ -3809,15 +3716,11 @@ struct FolderHoverLoopPreview: View {
     timer?.invalidate()
     timer = Timer.scheduledTimer(withTimeInterval: Double(clipLength), repeats: false) { _ in
       self.currentClip = (self.currentClip + 1) % self.startTimes.count
-      print(
-        "FolderHoverLoopPreview: Moving to next clip \(self.currentClip + 1)/\(self.startTimes.count) for \(url.lastPathComponent)"
-      )
       self.playCurrentClip()
     }
   }
 
   private func stopPlayback() {
-    print("FolderHoverLoopPreview: Stopping playback for \(url.lastPathComponent)")
     player?.pause()
     player?.rate = 0
     timer?.invalidate()
@@ -3902,7 +3805,6 @@ struct SingleSpeedPlayerFill: View {
         .cornerRadius(12)
         .onAppear {
           if !didAppear {
-            print("SingleSpeedPlayerFill: Starting playback with speed \(speedOption.rawValue)")
             startSpeedPlayback()
             didAppear = true
           }
@@ -3945,9 +3847,7 @@ struct SingleSpeedPlayerFill: View {
         periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
           forInterval: interval, queue: .main
         ) { time in
-          print(
-            "SingleSpeedPlayerFill: Current rate: \(newPlayer.rate), Expected rate: \(speedOption.rawValue)"
-          )
+          // Removed debug print for performance
         }
 
         // Add rate observer (but don't interfere with intentional pausing)
@@ -3958,9 +3858,6 @@ struct SingleSpeedPlayerFill: View {
           // Only restore rate if it's not intentionally paused (rate = 0)
           // and if it's not the expected speed rate
           if newPlayer.rate != 0 && newPlayer.rate != Float(speedOption.rawValue) {
-            print(
-              "SingleSpeedPlayerFill: Rate mismatch detected, forcing rate to \(speedOption.rawValue)"
-            )
             newPlayer.rate = Float(speedOption.rawValue)
           }
         }
@@ -3991,7 +3888,6 @@ struct SingleSpeedPlayerFill: View {
         ) { _ in
           // Only restore rate if not intentionally paused
           if newPlayer.rate != 0 {
-            print("SingleSpeedPlayerFill: Time jumped, ensuring rate is \(speedOption.rawValue)")
             newPlayer.rate = Float(speedOption.rawValue)
           }
         }
@@ -4005,18 +3901,13 @@ struct SingleSpeedPlayerFill: View {
     guard let player = player else { return }
     // Start at 2% of the video duration
     let startTime = duration * 0.02
-    print(
-      "SingleSpeedPlayerFill: Setting up playback at time \(startTime) with speed \(speedOption.rawValue)"
-    )
 
     // Set rate before seeking
     player.rate = Float(speedOption.rawValue)
-    print("SingleSpeedPlayerFill: Initial rate set to \(player.rate)")
 
     player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
       // Set rate again after seeking
       player.rate = Float(speedOption.rawValue)
-      print("SingleSpeedPlayerFill: Rate after seek: \(player.rate)")
       player.play()
     }
 
@@ -4027,12 +3918,8 @@ struct SingleSpeedPlayerFill: View {
       queue: .main
     ) { _ in
       // When video ends, seek back to 2% and continue playing
-      print(
-        "SingleSpeedPlayerFill: Video ended, restarting at \(startTime) with speed \(speedOption.rawValue)"
-      )
       player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
         player.rate = Float(speedOption.rawValue)
-        print("SingleSpeedPlayerFill: Rate after end seek: \(player.rate)")
         player.play()
       }
     }
@@ -4059,7 +3946,6 @@ struct SingleSpeedPlayerFill: View {
 
   private func updatePlaybackSpeed() {
     guard let player = player else { return }
-    print("SingleSpeedPlayerFill: Updating speed to \(speedOption.rawValue)")
     player.rate = Float(speedOption.rawValue)
   }
 
@@ -4098,7 +3984,6 @@ struct SpeedClipPreview: View {
           .cornerRadius(12)
           .onAppear {
             if !didAppear {
-              print("SpeedClipPreview: Starting playback with speed \(speedOption.rawValue)")
               startSpeedPlayback()
               didAppear = true
             }
@@ -4138,9 +4023,7 @@ struct SpeedClipPreview: View {
         periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
           forInterval: interval, queue: .main
         ) { time in
-          print(
-            "SpeedClipPreview: Current rate: \(newPlayer.rate), Expected rate: \(speedOption.rawValue)"
-          )
+          // Removed debug print for performance
         }
 
         // Add rate observer (but don't interfere with intentional pausing)
@@ -4151,8 +4034,7 @@ struct SpeedClipPreview: View {
           // Only restore rate if it's not intentionally paused (rate = 0)
           // and if it's not the expected speed rate
           if newPlayer.rate != 0 && newPlayer.rate != Float(speedOption.rawValue) {
-            print(
-              "SpeedClipPreview: Rate mismatch detected, forcing rate to \(speedOption.rawValue)")
+
             newPlayer.rate = Float(speedOption.rawValue)
           }
         }
@@ -4183,7 +4065,6 @@ struct SpeedClipPreview: View {
         ) { _ in
           // Only restore rate if not intentionally paused
           if newPlayer.rate != 0 {
-            print("SpeedClipPreview: Time jumped, ensuring rate is \(speedOption.rawValue)")
             newPlayer.rate = Float(speedOption.rawValue)
           }
         }
@@ -4197,18 +4078,13 @@ struct SpeedClipPreview: View {
     guard let player = player else { return }
     // Start at 2% of the video duration
     let startTime = duration * 0.02
-    print(
-      "SpeedClipPreview: Setting up playback at time \(startTime) with speed \(speedOption.rawValue)"
-    )
 
     // Set rate before seeking
     player.rate = Float(speedOption.rawValue)
-    print("SpeedClipPreview: Initial rate set to \(player.rate)")
 
     player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
       // Set rate again after seeking
       player.rate = Float(speedOption.rawValue)
-      print("SpeedClipPreview: Rate after seek: \(player.rate)")
       player.play()
     }
 
@@ -4219,12 +4095,8 @@ struct SpeedClipPreview: View {
       queue: .main
     ) { _ in
       // When video ends, seek back to 2% and continue playing
-      print(
-        "SpeedClipPreview: Video ended, restarting at \(startTime) with speed \(speedOption.rawValue)"
-      )
       player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
         player.rate = Float(speedOption.rawValue)
-        print("SpeedClipPreview: Rate after end seek: \(player.rate)")
         player.play()
       }
     }
@@ -4436,8 +4308,7 @@ struct FolderSpeedPreview: View {
           ContentView.thumbnailCache[url] = image
           thumbnail = image
         } catch {
-          print(
-            "Error loading thumbnail for \(url.lastPathComponent): \(error.localizedDescription)")
+
         }
       }
     }
@@ -4480,9 +4351,6 @@ struct FolderSpeedPreview: View {
       if let player = self.player,
         player.rate != 0 && player.rate != Float(self.speedOption.rawValue)
       {
-        print(
-          "FolderSpeedPreview: Rate mismatch detected (\(player.rate) vs \(self.speedOption.rawValue)), correcting..."
-        )
         player.rate = Float(self.speedOption.rawValue)
       }
     }
@@ -4493,7 +4361,6 @@ struct FolderSpeedPreview: View {
       queue: .main
     ) { _ in
       if let player = self.player, player.rate != 0 {
-        print("FolderSpeedPreview: Time jumped, ensuring rate is \(self.speedOption.rawValue)")
         player.rate = Float(self.speedOption.rawValue)
       }
     }
@@ -4505,9 +4372,6 @@ struct FolderSpeedPreview: View {
     guard let player = player, duration > 0 else { return }
 
     let startTime = duration * 0.02
-    print(
-      "FolderSpeedPreview: Starting speed playback at \(speedOption.rawValue)x for \(url.lastPathComponent)"
-    )
 
     // Set rate before seeking to establish intent
     player.rate = Float(speedOption.rawValue)
@@ -4519,15 +4383,11 @@ struct FolderSpeedPreview: View {
     ) { _ in
       // Set rate again after seeking and start playback
       player.rate = Float(self.speedOption.rawValue)
-      print("FolderSpeedPreview: Rate set to \(player.rate) after seek")
       player.play()
 
       // Double-check rate after a brief delay
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
         if player.rate != Float(self.speedOption.rawValue) {
-          print(
-            "FolderSpeedPreview: Rate correction needed after seek, setting to \(self.speedOption.rawValue)"
-          )
           player.rate = Float(self.speedOption.rawValue)
         }
       }
@@ -4539,7 +4399,6 @@ struct FolderSpeedPreview: View {
       object: player.currentItem,
       queue: .main
     ) { _ in
-      print("FolderSpeedPreview: Video ended, restarting at \(self.speedOption.rawValue)x")
       // Set rate first to establish intent
       player.rate = Float(self.speedOption.rawValue)
       player.seek(
@@ -4549,15 +4408,11 @@ struct FolderSpeedPreview: View {
       ) { _ in
         // Set rate again after seeking and start playback
         player.rate = Float(self.speedOption.rawValue)
-        print("FolderSpeedPreview: Rate set to \(player.rate) after loop seek")
         player.play()
 
         // Double-check rate after a brief delay to ensure it "sticks"
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
           if player.rate != Float(self.speedOption.rawValue) {
-            print(
-              "FolderSpeedPreview: Loop rate correction needed, setting to \(self.speedOption.rawValue)"
-            )
             player.rate = Float(self.speedOption.rawValue)
           }
         }
