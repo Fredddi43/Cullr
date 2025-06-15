@@ -59,6 +59,9 @@ enum SpeedOption: Double, CaseIterable, Identifiable {
   case x16 = 16.0
   case x24 = 24.0
   case x32 = 32.0
+  case x40 = 40.0
+  case x48 = 48.0
+  case x60 = 60.0
 
   var id: Double { self.rawValue }
   var displayName: String { "x\(Int(self.rawValue))" }
@@ -774,7 +777,19 @@ struct ContentView: View {
           $0 + ((try? FileManager.default.attributesOfItem(atPath: $1.path)[.size] as? UInt64) ?? 0)
         }
         let totalSize = formatFileSize(bytes: totalBytes)
-        let fileList = filesPendingDeletion.map { $0.lastPathComponent }.joined(separator: "\n")
+
+        // Create truncated file list
+        let maxFiles = 10
+        let fileNames = filesPendingDeletion.map { $0.lastPathComponent }
+        let displayFiles: [String]
+        if fileNames.count <= maxFiles {
+          displayFiles = fileNames
+        } else {
+          displayFiles =
+            Array(fileNames.prefix(maxFiles)) + ["... and \(fileNames.count - maxFiles) more"]
+        }
+        let fileList = displayFiles.joined(separator: "\n")
+
         return Alert(
           title: Text("Delete \(fileCount) file\(fileCount == 1 ? "" : "s")?"),
           message: Text(
@@ -3248,8 +3263,20 @@ struct HoverPreviewCard: View {
 
   private func updateSpeedPlayback() {
     guard let player = player else { return }
-    // Just update the rate, don't recreate everything
+    print(
+      "FolderSpeedPreview: Updating speed to \(speedOption.rawValue)x for \(url.lastPathComponent)")
+    // Set rate and verify it took effect
     player.rate = Float(speedOption.rawValue)
+
+    // Double-check after a brief delay
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+      if player.rate != Float(self.speedOption.rawValue) {
+        print(
+          "FolderSpeedPreview: Speed update correction needed, setting to \(self.speedOption.rawValue)"
+        )
+        player.rate = Float(self.speedOption.rawValue)
+      }
+    }
   }
 
   private func stopPlayback() {
@@ -4178,10 +4205,19 @@ struct FolderSpeedPreview: View {
     player = AVPlayer(playerItem: playerItem)
     player?.isMuted = isMuted
 
-    // Set up observers with better performance
-    let interval = CMTime(seconds: 0.2, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+    // Set up periodic observer to monitor and maintain correct playback rate
+    let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
     periodicTimeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) {
       _ in
+      // Continuously monitor and correct the rate if it's not what we expect
+      if let player = self.player,
+        player.rate != 0 && player.rate != Float(self.speedOption.rawValue)
+      {
+        print(
+          "FolderSpeedPreview: Rate mismatch detected (\(player.rate) vs \(self.speedOption.rawValue)), correcting..."
+        )
+        player.rate = Float(self.speedOption.rawValue)
+      }
     }
 
     rateObserver = NotificationCenter.default.addObserver(
@@ -4189,7 +4225,10 @@ struct FolderSpeedPreview: View {
       object: playerItem,
       queue: .main
     ) { _ in
-      self.player?.rate = Float(self.speedOption.rawValue)
+      if let player = self.player, player.rate != 0 {
+        print("FolderSpeedPreview: Time jumped, ensuring rate is \(self.speedOption.rawValue)")
+        player.rate = Float(self.speedOption.rawValue)
+      }
     }
 
     startSpeedPlayback()
@@ -4199,13 +4238,32 @@ struct FolderSpeedPreview: View {
     guard let player = player, duration > 0 else { return }
 
     let startTime = duration * 0.02
+    print(
+      "FolderSpeedPreview: Starting speed playback at \(speedOption.rawValue)x for \(url.lastPathComponent)"
+    )
+
+    // Set rate before seeking to establish intent
+    player.rate = Float(speedOption.rawValue)
+
     player.seek(
       to: CMTime(seconds: startTime, preferredTimescale: 600),
       toleranceBefore: .zero,
       toleranceAfter: .zero
     ) { _ in
+      // Set rate again after seeking and start playback
       player.rate = Float(self.speedOption.rawValue)
+      print("FolderSpeedPreview: Rate set to \(player.rate) after seek")
       player.play()
+
+      // Double-check rate after a brief delay
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        if player.rate != Float(self.speedOption.rawValue) {
+          print(
+            "FolderSpeedPreview: Rate correction needed after seek, setting to \(self.speedOption.rawValue)"
+          )
+          player.rate = Float(self.speedOption.rawValue)
+        }
+      }
     }
 
     // Set up end-of-video looping
@@ -4214,13 +4272,28 @@ struct FolderSpeedPreview: View {
       object: player.currentItem,
       queue: .main
     ) { _ in
+      print("FolderSpeedPreview: Video ended, restarting at \(self.speedOption.rawValue)x")
+      // Set rate first to establish intent
+      player.rate = Float(self.speedOption.rawValue)
       player.seek(
         to: CMTime(seconds: startTime, preferredTimescale: 600),
         toleranceBefore: .zero,
         toleranceAfter: .zero
       ) { _ in
+        // Set rate again after seeking and start playback
         player.rate = Float(self.speedOption.rawValue)
+        print("FolderSpeedPreview: Rate set to \(player.rate) after loop seek")
         player.play()
+
+        // Double-check rate after a brief delay to ensure it "sticks"
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+          if player.rate != Float(self.speedOption.rawValue) {
+            print(
+              "FolderSpeedPreview: Loop rate correction needed, setting to \(self.speedOption.rawValue)"
+            )
+            player.rate = Float(self.speedOption.rawValue)
+          }
+        }
       }
     }
   }
