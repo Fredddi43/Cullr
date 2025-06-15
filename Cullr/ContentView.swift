@@ -650,6 +650,20 @@ struct ContentView: View {
   @State private var showDeleteConfirmation = false
   @State private var filesPendingDeletion: [URL] = []
 
+  // Folder deletion states
+  @State private var showFolderDeleteConfirmation = false
+  @State private var folderPendingDeletion: URL? = nil
+  @State private var folderDeletionInfo: (fileCount: Int, size: String, name: String)? = nil
+
+  // Combined alert state
+  @State private var showAlert = false
+  @State private var alertType: AlertType = .fileDelete
+
+  enum AlertType {
+    case fileDelete
+    case folderDelete
+  }
+
   // Add persistent player size
   @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
 
@@ -771,40 +785,65 @@ struct ContentView: View {
         }
       }
       .id(viewReloadID)
-      .alert(isPresented: $showDeleteConfirmation) {
-        let fileCount = filesPendingDeletion.count
-        let totalBytes = filesPendingDeletion.reduce(0) {
-          $0 + ((try? FileManager.default.attributesOfItem(atPath: $1.path)[.size] as? UInt64) ?? 0)
-        }
-        let totalSize = formatFileSize(bytes: totalBytes)
+      .alert(isPresented: $showAlert) {
+        switch alertType {
+        case .fileDelete:
+          let fileCount = filesPendingDeletion.count
+          let totalBytes = filesPendingDeletion.reduce(0) {
+            $0
+              + ((try? FileManager.default.attributesOfItem(atPath: $1.path)[.size] as? UInt64) ?? 0)
+          }
+          let totalSize = formatFileSize(bytes: totalBytes)
 
-        // Create truncated file list
-        let maxFiles = 10
-        let fileNames = filesPendingDeletion.map { $0.lastPathComponent }
-        let displayFiles: [String]
-        if fileNames.count <= maxFiles {
-          displayFiles = fileNames
-        } else {
-          displayFiles =
-            Array(fileNames.prefix(maxFiles)) + ["... and \(fileNames.count - maxFiles) more"]
-        }
-        let fileList = displayFiles.joined(separator: "\n")
+          // Create truncated file list
+          let maxFiles = 10
+          let fileNames = filesPendingDeletion.map { $0.lastPathComponent }
+          let displayFiles: [String]
+          if fileNames.count <= maxFiles {
+            displayFiles = fileNames
+          } else {
+            displayFiles =
+              Array(fileNames.prefix(maxFiles)) + ["... and \(fileNames.count - maxFiles) more"]
+          }
+          let fileList = displayFiles.joined(separator: "\n")
 
-        return Alert(
-          title: Text("Delete \(fileCount) file\(fileCount == 1 ? "" : "s")?"),
-          message: Text(
-            "This will delete \(fileCount) file\(fileCount == 1 ? "" : "s") and free up \(totalSize):\n\n\(fileList)"
-          ),
-          primaryButton: .destructive(Text("Delete")) {
-            Task {
-              await processSelectedFiles(selected: Set(filesPendingDeletion))
+          return Alert(
+            title: Text("Delete \(fileCount) file\(fileCount == 1 ? "" : "s")?"),
+            message: Text(
+              "This will delete \(fileCount) file\(fileCount == 1 ? "" : "s") and free up \(totalSize):\n\n\(fileList)"
+            ),
+            primaryButton: .destructive(Text("Delete")) {
+              Task {
+                await processSelectedFiles(selected: Set(filesPendingDeletion))
+                filesPendingDeletion = []
+              }
+            },
+            secondaryButton: .cancel {
               filesPendingDeletion = []
             }
-          },
-          secondaryButton: .cancel {
-            filesPendingDeletion = []
+          )
+
+        case .folderDelete:
+          guard let info = folderDeletionInfo else {
+            return Alert(title: Text("Error"), message: Text("Could not get folder information"))
           }
-        )
+
+          return Alert(
+            title: Text("Delete Entire Folder?"),
+            message: Text(
+              "This will permanently delete the folder \"\(info.name)\" containing \(info.fileCount) files (\(info.size)).\n\nThis action cannot be undone."
+            ),
+            primaryButton: .destructive(Text("Delete Folder")) {
+              Task {
+                await deleteFolderPermanently()
+              }
+            },
+            secondaryButton: .cancel {
+              folderPendingDeletion = nil
+              folderDeletionInfo = nil
+            }
+          )
+        }
       }
 
       // Folder Collection Bottom Bar
@@ -820,6 +859,20 @@ struct ContentView: View {
             Spacer()
             Text(folderURL?.lastPathComponent ?? "")
               .font(.headline)
+            Spacer()
+            Button(action: {
+              Task {
+                await prepareFolderDeletion()
+              }
+            }) {
+              HStack(spacing: 4) {
+                Image(systemName: "trash")
+                Text("Delete Entire Folder")
+              }
+            }
+            .buttonStyle(.bordered)
+            .foregroundColor(.red)
+            .disabled(folderURL == nil)
             Spacer()
             Text("\(currentFolderIndex + 1) / \(folderCollection.count)")
               .font(.subheadline)
@@ -1269,7 +1322,8 @@ struct ContentView: View {
           Spacer()
           Button("Delete Selected Files") {
             filesPendingDeletion = Array(selectedURLs)
-            showDeleteConfirmation = true
+            alertType = .fileDelete
+            showAlert = true
           }
           .buttonStyle(.borderedProminent)
           .disabled(selectedURLs.isEmpty)
@@ -1402,6 +1456,218 @@ struct ContentView: View {
   private func stopPlayback() {
     player?.pause()
     player = nil
+  }
+
+  // MARK: — Folder Deletion Functions
+  private func prepareFolderDeletion() async {
+    guard let folder = folderURL else { return }
+
+    folderPendingDeletion = folder
+
+    // Calculate folder info
+    let fm = FileManager.default
+    var totalFiles = 0
+    var totalSize: UInt64 = 0
+
+    do {
+      let contents = try fm.contentsOfDirectory(
+        at: folder,
+        includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey],
+        options: []
+      )
+
+      for url in contents {
+        let resourceValues = try url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+        if let isDirectory = resourceValues.isDirectory, !isDirectory {
+          totalFiles += 1
+          if let size = resourceValues.fileSize {
+            totalSize += UInt64(size)
+          }
+        } else if let isDirectory = resourceValues.isDirectory, isDirectory {
+          // Count files in subdirectories
+          let (subFiles, subSize) = await countFilesInDirectory(url: url)
+          totalFiles += subFiles
+          totalSize += subSize
+        }
+      }
+    } catch {
+      print("Error calculating folder info: \(error.localizedDescription)")
+    }
+
+    await MainActor.run {
+      folderDeletionInfo = (
+        fileCount: totalFiles,
+        size: formatFileSize(bytes: totalSize),
+        name: folder.lastPathComponent
+      )
+      alertType = .folderDelete
+      showAlert = true
+    }
+  }
+
+  private func countFilesInDirectory(url: URL) async -> (Int, UInt64) {
+    let fm = FileManager.default
+    var fileCount = 0
+    var totalSize: UInt64 = 0
+
+    do {
+      let contents = try fm.contentsOfDirectory(
+        at: url,
+        includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey],
+        options: []
+      )
+
+      for itemURL in contents {
+        let resourceValues = try itemURL.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+        if let isDirectory = resourceValues.isDirectory, !isDirectory {
+          fileCount += 1
+          if let size = resourceValues.fileSize {
+            totalSize += UInt64(size)
+          }
+        } else if let isDirectory = resourceValues.isDirectory, isDirectory {
+          let (subFiles, subSize) = await countFilesInDirectory(url: itemURL)
+          fileCount += subFiles
+          totalSize += subSize
+        }
+      }
+    } catch {
+      print("Error counting files in \(url.path): \(error.localizedDescription)")
+    }
+
+    return (fileCount, totalSize)
+  }
+
+  private func deleteFolderPermanently() async {
+    guard let folder = folderPendingDeletion else { return }
+
+    print("Attempting to delete entire folder: \(folder.lastPathComponent)")
+
+    // Try to access the security scoped resource if needed
+    let accessing = folder.startAccessingSecurityScopedResource()
+    defer {
+      if accessing {
+        folder.stopAccessingSecurityScopedResource()
+      }
+    }
+
+    do {
+      try FileManager.default.trashItem(at: folder, resultingItemURL: nil)
+      print("Successfully moved folder to trash: \(folder.lastPathComponent)")
+
+      await MainActor.run {
+        // Check if we're deleting the parent folder (first in collection)
+        let wasParentFolder = currentFolderIndex == 0 && folderCollection.first == folder
+
+        // Remove the folder from the collection
+        folderCollection.removeAll { $0 == folder }
+
+        if folderCollection.isEmpty || wasParentFolder {
+          // No more folders or deleted parent folder - reset to initial state and trigger folder selection
+          folderURL = nil
+          videoURLs.removeAll()
+          currentIndex = 0
+          batchSelection.removeAll()
+          selectedURLs.removeAll()
+          fileInfo.removeAll()
+          staticThumbnails.removeAll()
+          currentFolderIndex = 0
+          if let window = NSApplication.shared.windows.first {
+            window.title = "Cullr"
+          }
+
+          // If we deleted the parent folder, trigger folder selection after a brief delay
+          if wasParentFolder {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+              self.selectFolder()
+            }
+          }
+        } else {
+          // Move to next available folder
+          if currentFolderIndex >= folderCollection.count {
+            currentFolderIndex = folderCollection.count - 1
+          }
+          folderURL = folderCollection[currentFolderIndex]
+          if folderURL!.startAccessingSecurityScopedResource() {
+            folderAccessing = true
+          }
+          loadVideosAndThumbnails(from: folderURL!)
+          if let window = NSApplication.shared.windows.first {
+            window.title = folderURL!.lastPathComponent
+          }
+        }
+
+        // Clear deletion state
+        folderPendingDeletion = nil
+        folderDeletionInfo = nil
+      }
+
+    } catch {
+      print("Failed to trash folder, trying direct removal: \(error)")
+      do {
+        try FileManager.default.removeItem(at: folder)
+        print("Successfully removed folder: \(folder.lastPathComponent)")
+
+        await MainActor.run {
+          // Check if we're deleting the parent folder (first in collection)
+          let wasParentFolder = currentFolderIndex == 0 && folderCollection.first == folder
+
+          // Same cleanup as above
+          folderCollection.removeAll { $0 == folder }
+
+          if folderCollection.isEmpty || wasParentFolder {
+            // No more folders or deleted parent folder - reset to initial state and trigger folder selection
+            folderURL = nil
+            videoURLs.removeAll()
+            currentIndex = 0
+            batchSelection.removeAll()
+            selectedURLs.removeAll()
+            fileInfo.removeAll()
+            staticThumbnails.removeAll()
+            currentFolderIndex = 0
+            if let window = NSApplication.shared.windows.first {
+              window.title = "Cullr"
+            }
+
+            // If we deleted the parent folder, trigger folder selection after a brief delay
+            if wasParentFolder {
+              DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.selectFolder()
+              }
+            }
+          } else {
+            if currentFolderIndex >= folderCollection.count {
+              currentFolderIndex = folderCollection.count - 1
+            }
+            folderURL = folderCollection[currentFolderIndex]
+            if folderURL!.startAccessingSecurityScopedResource() {
+              folderAccessing = true
+            }
+            loadVideosAndThumbnails(from: folderURL!)
+            if let window = NSApplication.shared.windows.first {
+              window.title = folderURL!.lastPathComponent
+            }
+          }
+
+          folderPendingDeletion = nil
+          folderDeletionInfo = nil
+        }
+
+      } catch {
+        print("Failed to remove folder: \(error)")
+        await MainActor.run {
+          let alert = NSAlert()
+          alert.messageText = "Failed to Delete Folder"
+          alert.informativeText =
+            "Could not delete folder \(folder.lastPathComponent): \(error.localizedDescription)"
+          alert.alertStyle = .warning
+          alert.addButton(withTitle: "OK")
+          alert.runModal()
+
+          folderPendingDeletion = nil
+          folderDeletionInfo = nil
+        }
+      }
+    }
   }
 
   // MARK: — Process Selected Files
@@ -2271,7 +2537,8 @@ struct ContentView: View {
               Spacer()
               Button("Delete Selected Files") {
                 filesPendingDeletion = zip(videoURLs, batchSelection).filter { $0.1 }.map { $0.0 }
-                showDeleteConfirmation = true
+                alertType = .fileDelete
+                showAlert = true
               }
               .buttonStyle(.borderedProminent)
               .disabled(!batchSelection.contains(true))
