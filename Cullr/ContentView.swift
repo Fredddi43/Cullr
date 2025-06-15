@@ -1221,16 +1221,21 @@ struct ContentView: View {
                   VStack(alignment: .leading, spacing: 2) {
                     Text(url.lastPathComponent)
                       .font(.headline)
+                      .lineLimit(2)
+                      .multilineTextAlignment(.leading)
                     Text("\(info.size) • \(info.duration) • \(info.resolution) • \(info.fps)")
                       .font(.subheadline)
                       .foregroundColor(.secondary)
+                      .lineLimit(1)
                   }
                   .frame(maxWidth: .infinity, alignment: .leading)
-                  .padding(.horizontal, 16)
-                  .padding(.vertical, 2)
+                  .frame(height: 60)  // Fixed height for consistent grid alignment
+                  .padding(.horizontal, 8)
+                  .padding(.vertical, 4)
                   .padding(.bottom, isFolderCollectionMode ? 32 : 0)
                 }
               }
+              .frame(maxWidth: .infinity)  // Ensure consistent width
             }
           }
           .padding(8)
@@ -2315,6 +2320,10 @@ struct ContentView: View {
             .cornerRadius(10)
           }
         }
+        .overlay(
+          RoundedRectangle(cornerRadius: 10)
+            .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
+        )
         VStack(alignment: .leading, spacing: 4) {
           Text(url.lastPathComponent)
             .lineLimit(2)
@@ -2337,7 +2346,7 @@ struct ContentView: View {
         isSelected.toggle()
       }
       .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
-      .padding(.vertical, 8)
+      .padding(.vertical, isSelected ? 12 : 8)
       .padding(.horizontal, 16)
       .task {
         // Load thumbnail exactly like folder view
@@ -2396,7 +2405,7 @@ struct ContentView: View {
     HStack {
       Spacer()
       HStack(spacing: 8) {
-        Slider(value: $playerPreviewSize, in: 100...600, step: 1)
+        Slider(value: $playerPreviewSize, in: 100...400, step: 1)
           .frame(width: 160)
         Text(LocalizedStringKey("Player Size: "))
           .font(.caption)
