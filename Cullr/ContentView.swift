@@ -1461,7 +1461,9 @@ struct ContentView: View {
       let asset = AVAsset(url: url)
       let generator = AVAssetImageGenerator(asset: asset)
       generator.appliesPreferredTrackTransform = true
-      generator.maximumSize = CGSize(width: 400, height: 225)
+      generator.maximumSize = CGSize(width: 1200, height: 675)  // Much higher resolution for crisp thumbnails
+      generator.requestedTimeToleranceBefore = .zero
+      generator.requestedTimeToleranceAfter = .zero
 
       // Use the provided time directly since we already set it to 0.02 for speed mode in loadVideosAndThumbnails
       let cmTime = CMTime(seconds: time, preferredTimescale: 600)
@@ -2186,7 +2188,9 @@ struct ContentView: View {
             let asset = AVURLAsset(url: url)
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 400, height: 225)
+            generator.maximumSize = CGSize(width: 1200, height: 675)  // Much higher resolution for crisp thumbnails
+            generator.requestedTimeToleranceBefore = .zero
+            generator.requestedTimeToleranceAfter = .zero
             // Use the same 2% offset as the video preview
             let cmTime = CMTime(seconds: asset.duration.seconds * 0.02, preferredTimescale: 600)
             let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
@@ -2293,7 +2297,9 @@ struct VideoThumbnailView: View {
       let time = max(duration * 0.02, 0.0)  // This matches the hover preview start time
       let generator = AVAssetImageGenerator(asset: asset)
       generator.appliesPreferredTrackTransform = true
-      generator.maximumSize = CGSize(width: 400, height: 225)
+      generator.maximumSize = CGSize(width: 1200, height: 675)  // Much higher resolution for crisp thumbnails
+      generator.requestedTimeToleranceBefore = .zero
+      generator.requestedTimeToleranceAfter = .zero
       let cmTime = CMTime(seconds: time, preferredTimescale: 600)
       let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
       let image = Image(decorative: cgImage, scale: 1.0)
@@ -2566,7 +2572,7 @@ struct PreviewCard: View {
   static var thumbnailCache: [URL: Image] = [:]
   static var thumbnailLoadingQueue = DispatchQueue(
     label: "com.videoculler.thumbnail", qos: .userInitiated)
-  static let thumbnailTimeout: TimeInterval = 3.0  // 3 second timeout
+  static let thumbnailTimeout: TimeInterval = 2.0  // Reduced timeout
 
   static func loadThumbnail(for url: URL) async -> (Image?, Bool) {
     if let cached = thumbnailCache[url] {
@@ -2577,10 +2583,12 @@ struct PreviewCard: View {
       let asset = AVURLAsset(url: url)
       let generator = AVAssetImageGenerator(asset: asset)
       generator.appliesPreferredTrackTransform = true
-      generator.maximumSize = CGSize(width: 300, height: 300)
+      generator.maximumSize = CGSize(width: 1200, height: 675)  // Much higher resolution for crisp thumbnails
+      generator.requestedTimeToleranceBefore = .zero
+      generator.requestedTimeToleranceAfter = .zero
 
-      // Add a small delay between thumbnail generations
-      try await Task.sleep(nanoseconds: 50_000_000)  // 50ms delay
+      // Reduced delay for faster thumbnail loading
+      try await Task.sleep(nanoseconds: 25_000_000)  // 25ms delay
 
       // Get the duration and use 2% offset
       let duration = try await asset.load(.duration)
@@ -2649,12 +2657,12 @@ struct PreviewCard: View {
     if player == nil {
       Task {
         do {
-          // Add timeout to prevent hanging
-          try await withTimeout(5.0) {
+          // Reduced timeout for faster hover response
+          try await withTimeout(2.0) {
             let asset = AVURLAsset(url: url)
 
-            // Load asset asynchronously
-            let (_, _) = try await asset.load(.tracks, .duration)
+            // Load only duration, not tracks (faster)
+            let _ = try await asset.load(.duration)
 
             let item = AVPlayerItem(asset: asset)
             let newPlayer = AVPlayer(playerItem: item)
@@ -2666,12 +2674,10 @@ struct PreviewCard: View {
               player = newPlayer
               isPlayerReady = true
 
-              // Start playback after a short delay
-              DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                if isHovered {
-                  player?.play()
-                  isPlaying = true
-                }
+              // Start playback immediately if still hovered
+              if isHovered {
+                player?.play()
+                isPlaying = true
               }
             }
           }
@@ -2771,12 +2777,12 @@ struct FolderViewPreviewCard: View {
     if player == nil {
       Task {
         do {
-          // Add timeout to prevent hanging
-          try await withTimeout(5.0) {
+          // Reduced timeout for faster hover response
+          try await withTimeout(2.0) {
             let asset = AVURLAsset(url: url)
 
-            // Load asset asynchronously
-            let (_, _) = try await asset.load(.tracks, .duration)
+            // Load only duration, not tracks (faster)
+            let _ = try await asset.load(.duration)
 
             let item = AVPlayerItem(asset: asset)
             let newPlayer = AVPlayer(playerItem: item)
@@ -2788,12 +2794,10 @@ struct FolderViewPreviewCard: View {
               player = newPlayer
               isPlayerReady = true
 
-              // Start playback after a short delay
-              DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                if isHovered {
-                  player?.play()
-                  isPlaying = true
-                }
+              // Start playback immediately if still hovered
+              if isHovered {
+                player?.play()
+                isPlaying = true
               }
             }
           }
@@ -2861,11 +2865,13 @@ struct HoverPreviewCard: View {
   var playbackType: PlaybackType
   var speedOption: SpeedOption
   @State private var player: AVPlayer? = nil
+  @State private var asset: AVURLAsset? = nil
   @State private var duration: Double = 0
   @State private var periodicTimeObserver: Any? = nil
   @State private var rateObserver: NSObjectProtocol? = nil
   @State private var playbackEndObserver: NSObjectProtocol? = nil
   @State private var pendingSpeedPlayback: Bool = false
+  @State private var isAssetReady: Bool = false
 
   var body: some View {
     ZStack {
@@ -2879,9 +2885,9 @@ struct HoverPreviewCard: View {
       if forcePlay && playbackType == .speed, let player = player {
         NoControlsPlayerView(player: player)
           .onAppear {
-            // Always recreate the player on hover-in
-            playerCleanup()
-            setupPlayer()
+            if isAssetReady {
+              startSpeedPlayback()
+            }
           }
           .onDisappear {
             stopPlayback()
@@ -2890,7 +2896,9 @@ struct HoverPreviewCard: View {
         if let player = player {
           NoControlsPlayerView(player: player)
             .onAppear {
-              player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
+              player.seek(
+                to: CMTime(seconds: startTime, preferredTimescale: 600), toleranceBefore: .zero,
+                toleranceAfter: .zero)
               player.play()
             }
             .onDisappear {
@@ -2899,42 +2907,78 @@ struct HoverPreviewCard: View {
         } else {
           Color.clear
             .onAppear {
-              let asset = AVURLAsset(url: url)
-              let item = AVPlayerItem(asset: asset)
-              let newPlayer = AVPlayer(playerItem: item)
-              newPlayer.isMuted = isMuted
-              player = newPlayer
+              createPlayerForClips()
             }
         }
       }
     }
     .clipped()
+    .onAppear {
+      // Pre-create asset for faster hover response
+      if asset == nil {
+        preCreateAsset()
+      }
+    }
     .onChange(of: speedOption) { _ in
-      if forcePlay && playbackType == .speed {
-        playerCleanup()
-        setupPlayer()
+      if forcePlay && playbackType == .speed && isAssetReady {
+        updateSpeedPlayback()
       }
     }
     .onChange(of: forcePlay) { newForcePlay in
       if newForcePlay && playbackType == .speed {
-        playerCleanup()
-        setupPlayer()
+        if isAssetReady {
+          createPlayerForSpeed()
+        }
       } else if !newForcePlay {
         stopPlayback()
       }
     }
   }
 
-  private func setupPlayer() {
-    let asset = AVURLAsset(url: url)
+  private func preCreateAsset() {
+    // Pre-create asset but don't load heavy properties yet
+    asset = AVURLAsset(url: url)
+
+    // Load duration in background for speed mode
+    if playbackType == .speed {
+      Task {
+        if let asset = asset {
+          let loadedDuration = try? await asset.load(.duration)
+          await MainActor.run {
+            self.duration = loadedDuration?.seconds ?? 0
+            self.isAssetReady = true
+          }
+        }
+      }
+    } else {
+      isAssetReady = true
+    }
+  }
+
+  private func createPlayerForClips() {
+    guard let asset = asset else {
+      preCreateAsset()
+      return
+    }
+    let item = AVPlayerItem(asset: asset)
+    let newPlayer = AVPlayer(playerItem: item)
+    newPlayer.isMuted = isMuted
+    player = newPlayer
+  }
+
+  private func createPlayerForSpeed() {
+    guard let asset = asset, isAssetReady else { return }
     let playerItem = AVPlayerItem(asset: asset)
     let newPlayer = AVPlayer(playerItem: playerItem)
     newPlayer.isMuted = isMuted
     player = newPlayer
-    let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+
+    // Set up observers
+    let interval = CMTime(seconds: 0.2, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
     periodicTimeObserver = newPlayer.addPeriodicTimeObserver(forInterval: interval, queue: .main) {
       _ in
     }
+
     rateObserver = NotificationCenter.default.addObserver(
       forName: .AVPlayerItemTimeJumped,
       object: playerItem,
@@ -2942,47 +2986,32 @@ struct HoverPreviewCard: View {
     ) { _ in
       newPlayer.rate = Float(speedOption.rawValue)
     }
-    Task {
-      let loadedDuration = try? await asset.load(.duration)
-      await MainActor.run {
-        self.duration = loadedDuration?.seconds ?? 0
-        if forcePlay {
-          resetAndStartSpeedPlayback()
-        } else if pendingSpeedPlayback {
-          pendingSpeedPlayback = false
-          resetAndStartSpeedPlayback()
-        }
-      }
-    }
+
+    startSpeedPlayback()
   }
 
-  private func resetAndStartSpeedPlayback() {
-    guard let player = player else { return }
-    guard duration > 0 else {
-      pendingSpeedPlayback = true
-      return
-    }
-    player.pause()
-    player.rate = 0
+  private func startSpeedPlayback() {
+    guard let player = player, duration > 0 else { return }
+
     let startTime = duration * 0.02
     player.seek(
-      to: CMTime(seconds: startTime, preferredTimescale: 600), toleranceBefore: .zero,
+      to: CMTime(seconds: startTime, preferredTimescale: 600),
+      toleranceBefore: .zero,
       toleranceAfter: .zero
     ) { _ in
       player.rate = Float(speedOption.rawValue)
       player.play()
     }
-    if playbackEndObserver != nil {
-      NotificationCenter.default.removeObserver(playbackEndObserver!)
-      playbackEndObserver = nil
-    }
+
+    // Set up end-of-video looping
     playbackEndObserver = NotificationCenter.default.addObserver(
       forName: .AVPlayerItemDidPlayToEndTime,
       object: player.currentItem,
       queue: .main
     ) { _ in
       player.seek(
-        to: CMTime(seconds: startTime, preferredTimescale: 600), toleranceBefore: .zero,
+        to: CMTime(seconds: startTime, preferredTimescale: 600),
+        toleranceBefore: .zero,
         toleranceAfter: .zero
       ) { _ in
         player.rate = Float(speedOption.rawValue)
@@ -2991,9 +3020,16 @@ struct HoverPreviewCard: View {
     }
   }
 
+  private func updateSpeedPlayback() {
+    guard let player = player else { return }
+    // Just update the rate, don't recreate everything
+    player.rate = Float(speedOption.rawValue)
+  }
+
   private func stopPlayback() {
     player?.pause()
     player?.rate = 0
+
     if let observer = playbackEndObserver {
       NotificationCenter.default.removeObserver(observer)
       playbackEndObserver = nil
@@ -3006,12 +3042,10 @@ struct HoverPreviewCard: View {
       NotificationCenter.default.removeObserver(observer)
       rateObserver = nil
     }
-    pendingSpeedPlayback = false
-    player = nil
-  }
 
-  private func playerCleanup() {
-    stopPlayback()
+    // Keep the asset for reuse, just clear the player
+    player = nil
+    pendingSpeedPlayback = false
   }
 }
 
@@ -3025,6 +3059,7 @@ struct FolderHoverLoopPreview: View {
   let speedOption: SpeedOption
   @State private var isHovered = false
   @State private var player: AVPlayer? = nil
+  @State private var asset: AVURLAsset? = nil
   @State private var currentClip: Int = 0
   @State private var timer: Timer? = nil
   @State private var startTimes: [Double] = []
@@ -3037,6 +3072,7 @@ struct FolderHoverLoopPreview: View {
   @State private var thumbnail: Image? = nil
   @State private var playbackEndObserver: NSObjectProtocol? = nil
   @State private var periodicTimeObserver: Any? = nil
+  @State private var isAssetReady: Bool = false
 
   var body: some View {
     ZStack {
@@ -3083,10 +3119,10 @@ struct FolderHoverLoopPreview: View {
         "FolderHoverLoopPreview: Hover state changed to \(hovering) for \(url.lastPathComponent)")
       isHovered = hovering
       if hovering {
-        if player == nil {
-          print("FolderHoverLoopPreview: Setting up new player for \(url.lastPathComponent)")
-          setupPlayer()
-        } else {
+        if player == nil && isAssetReady {
+          print("FolderHoverLoopPreview: Creating player for \(url.lastPathComponent)")
+          createPlayer()
+        } else if player != nil {
           if playbackType == .clips {
             print("FolderHoverLoopPreview: Restarting clip looping for \(url.lastPathComponent)")
             startLoopingClips()
@@ -3100,6 +3136,12 @@ struct FolderHoverLoopPreview: View {
         stopPlayback()
       }
     }
+    .onAppear {
+      // Pre-create asset for faster hover response
+      if asset == nil {
+        preCreateAsset()
+      }
+    }
     .task {
       // Load thumbnail
       if let cached = ContentView.thumbnailCache[url] {
@@ -3109,7 +3151,9 @@ struct FolderHoverLoopPreview: View {
           let asset = AVURLAsset(url: url)
           let generator = AVAssetImageGenerator(asset: asset)
           generator.appliesPreferredTrackTransform = true
-          generator.maximumSize = CGSize(width: 400, height: 225)
+          generator.maximumSize = CGSize(width: 1200, height: 675)  // Much higher resolution for crisp thumbnails
+          generator.requestedTimeToleranceBefore = .zero
+          generator.requestedTimeToleranceAfter = .zero
           // Use the same 2% offset as the video preview
           let cmTime = CMTime(seconds: asset.duration.seconds * 0.02, preferredTimescale: 600)
           let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
@@ -3126,34 +3170,54 @@ struct FolderHoverLoopPreview: View {
     .cornerRadius(8)
   }
 
-  private func setupPlayer() {
-    print("FolderHoverLoopPreview: Setting up player for \(url.lastPathComponent)")
-    let asset = AVURLAsset(url: url)
+  private func preCreateAsset() {
+    print("FolderHoverLoopPreview: Pre-creating asset for \(url.lastPathComponent)")
+    asset = AVURLAsset(url: url)
+
+    // Load duration in background
+    Task {
+      if let asset = asset {
+        let loadedDuration = try? await asset.load(.duration)
+        await MainActor.run {
+          self.duration = loadedDuration?.seconds ?? 0
+          if playbackType == .clips && duration > 0 {
+            startTimes = computeStartTimes(duration: duration, count: numberOfClips)
+            print(
+              "FolderHoverLoopPreview: Generated clip times: \(startTimes) for \(url.lastPathComponent)"
+            )
+          }
+          self.isAssetReady = true
+          print("FolderHoverLoopPreview: Asset ready for \(url.lastPathComponent)")
+
+          // If we're hovered and waiting, create player now
+          if isHovered && player == nil {
+            createPlayer()
+          }
+        }
+      }
+    }
+  }
+
+  private func createPlayer() {
+    guard let asset = asset, isAssetReady else { return }
+    print("FolderHoverLoopPreview: Creating player for \(url.lastPathComponent)")
+
     let playerItem = AVPlayerItem(asset: asset)
     player = AVPlayer(playerItem: playerItem)
     player?.isMuted = isMuted
 
-    // Add periodic time observer
-    let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+    // Add periodic time observer (less frequent for better performance)
+    let interval = CMTime(seconds: 0.2, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
     periodicTimeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) {
       time in
-      print("FolderHoverLoopPreview: Current time: \(time.seconds) for \(url.lastPathComponent)")
+      // Removed debug print for performance
     }
 
-    // Observe duration
-    Task {
-      let duration = try await asset.load(.duration)
-      print(
-        "FolderHoverLoopPreview: Video duration: \(duration.seconds) for \(url.lastPathComponent)")
-      await MainActor.run {
-        self.duration = duration.seconds
-        if playbackType == .clips {
-          startTimes = computeStartTimes(duration: duration.seconds, count: numberOfClips)
-          print(
-            "FolderHoverLoopPreview: Generated clip times: \(startTimes) for \(url.lastPathComponent)"
-          )
-        }
-      }
+    // Start playback based on type
+    if playbackType == .clips {
+      startLoopingClips()
+    } else {
+      startSpeedPlayback()
     }
   }
 
@@ -3777,6 +3841,7 @@ struct FolderSpeedPreview: View {
   let speedOption: SpeedOption
   @State private var isHovered = false
   @State private var player: AVPlayer? = nil
+  @State private var asset: AVURLAsset? = nil
   @State private var duration: Double = 0
   @State private var fadeOpacity: Double = 0.0
   @State private var thumbnail: Image? = nil
@@ -3784,6 +3849,7 @@ struct FolderSpeedPreview: View {
   @State private var periodicTimeObserver: Any? = nil
   @State private var rateObserver: NSObjectProtocol? = nil
   @State private var pendingSpeedPlayback: Bool = false
+  @State private var isAssetReady: Bool = false
 
   var body: some View {
     ZStack {
@@ -3802,7 +3868,7 @@ struct FolderSpeedPreview: View {
           .opacity(fadeOpacity)
           .onAppear {
             withAnimation(.easeIn(duration: 0.2)) { fadeOpacity = 1.0 }
-            resetAndStartSpeedPlayback()
+            startSpeedPlayback()
           }
           .onDisappear {
             withAnimation(.easeOut(duration: 0.2)) { fadeOpacity = 0.0 }
@@ -3813,16 +3879,23 @@ struct FolderSpeedPreview: View {
     .onHover { hovering in
       isHovered = hovering
       if hovering {
-        // Always recreate the player on hover-in
-        player = nil
-        setupPlayer()
+        if player == nil && isAssetReady {
+          createPlayer()
+        }
       } else {
         stopPlayback()
       }
     }
+    .onAppear {
+      // Pre-create asset for faster hover response
+      if asset == nil {
+        preCreateAsset()
+      }
+    }
     .onChange(of: speedOption) { _ in
-      if isHovered, player != nil {
-        resetAndStartSpeedPlayback()
+      if isHovered, let player = player {
+        // Just update the rate, don't recreate everything
+        updateSpeedPlayback()
       }
     }
     .task {
@@ -3833,7 +3906,9 @@ struct FolderSpeedPreview: View {
           let asset = AVURLAsset(url: url)
           let generator = AVAssetImageGenerator(asset: asset)
           generator.appliesPreferredTrackTransform = true
-          generator.maximumSize = CGSize(width: 400, height: 225)
+          generator.maximumSize = CGSize(width: 1200, height: 675)  // Much higher resolution for crisp thumbnails
+          generator.requestedTimeToleranceBefore = .zero
+          generator.requestedTimeToleranceAfter = .zero
           let cmTime = CMTime(seconds: asset.duration.seconds * 0.02, preferredTimescale: 600)
           let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
           let image = Image(decorative: cgImage, scale: 1.0)
@@ -3849,71 +3924,84 @@ struct FolderSpeedPreview: View {
     .cornerRadius(8)
   }
 
-  private func setupPlayer() {
-    let asset = AVURLAsset(url: url)
-    let playerItem = AVPlayerItem(asset: asset)
-    player = AVPlayer(playerItem: playerItem)
-    player?.isMuted = isMuted
-    let interval = CMTime(seconds: 0.1, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-    periodicTimeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) {
-      _ in
-    }
-    rateObserver = NotificationCenter.default.addObserver(
-      forName: .AVPlayerItemTimeJumped,
-      object: playerItem,
-      queue: .main
-    ) { _ in
-      player?.rate = Float(speedOption.rawValue)
-    }
+  private func preCreateAsset() {
+    asset = AVURLAsset(url: url)
+
+    // Load duration in background
     Task {
-      let loadedDuration = try await asset.load(.duration)
-      await MainActor.run {
-        self.duration = loadedDuration.seconds
-        if isHovered {
-          resetAndStartSpeedPlayback()
-        } else if pendingSpeedPlayback {
-          pendingSpeedPlayback = false
-          resetAndStartSpeedPlayback()
+      if let asset = asset {
+        let loadedDuration = try? await asset.load(.duration)
+        await MainActor.run {
+          self.duration = loadedDuration?.seconds ?? 0
+          self.isAssetReady = true
+
+          // If we're hovered and waiting, create player now
+          if isHovered && player == nil {
+            createPlayer()
+          }
         }
       }
     }
   }
 
-  private func resetAndStartSpeedPlayback() {
-    guard let player = player else { return }
-    guard duration > 0 else {
-      pendingSpeedPlayback = true
-      return
+  private func createPlayer() {
+    guard let asset = asset, isAssetReady else { return }
+
+    let playerItem = AVPlayerItem(asset: asset)
+    player = AVPlayer(playerItem: playerItem)
+    player?.isMuted = isMuted
+
+    // Set up observers with better performance
+    let interval = CMTime(seconds: 0.2, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
+    periodicTimeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) {
+      _ in
     }
-    // Always pause before seeking
-    player.pause()
-    player.rate = 0
+
+    rateObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemTimeJumped,
+      object: playerItem,
+      queue: .main
+    ) { _ in
+      self.player?.rate = Float(self.speedOption.rawValue)
+    }
+
+    startSpeedPlayback()
+  }
+
+  private func startSpeedPlayback() {
+    guard let player = player, duration > 0 else { return }
+
     let startTime = duration * 0.02
     player.seek(
-      to: CMTime(seconds: startTime, preferredTimescale: 600), toleranceBefore: .zero,
+      to: CMTime(seconds: startTime, preferredTimescale: 600),
+      toleranceBefore: .zero,
       toleranceAfter: .zero
     ) { _ in
-      player.rate = Float(speedOption.rawValue)
+      player.rate = Float(self.speedOption.rawValue)
       player.play()
     }
-    // Remove old observer if any
-    if playbackEndObserver != nil {
-      NotificationCenter.default.removeObserver(playbackEndObserver!)
-      playbackEndObserver = nil
-    }
+
+    // Set up end-of-video looping
     playbackEndObserver = NotificationCenter.default.addObserver(
       forName: .AVPlayerItemDidPlayToEndTime,
       object: player.currentItem,
       queue: .main
     ) { _ in
       player.seek(
-        to: CMTime(seconds: startTime, preferredTimescale: 600), toleranceBefore: .zero,
+        to: CMTime(seconds: startTime, preferredTimescale: 600),
+        toleranceBefore: .zero,
         toleranceAfter: .zero
       ) { _ in
-        player.rate = Float(speedOption.rawValue)
+        player.rate = Float(self.speedOption.rawValue)
         player.play()
       }
     }
+  }
+
+  private func updateSpeedPlayback() {
+    guard let player = player else { return }
+    // Just update the rate, don't recreate everything
+    player.rate = Float(speedOption.rawValue)
   }
 
   private func stopPlayback() {
