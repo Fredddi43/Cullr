@@ -74,6 +74,99 @@ enum SortOption: String, CaseIterable, Identifiable {
   var id: String { self.rawValue }
 }
 
+enum FilterSizeOption: String, CaseIterable, Identifiable {
+  case all = "All Sizes"
+  case small = "< 100 MB"
+  case medium = "100 MB - 1 GB"
+  case large = "1 GB - 5 GB"
+  case xlarge = "> 5 GB"
+
+  var id: String { self.rawValue }
+
+  func matches(sizeBytes: UInt64) -> Bool {
+    let sizeMB = Double(sizeBytes) / (1024 * 1024)
+    let sizeGB = sizeMB / 1024
+
+    switch self {
+    case .all: return true
+    case .small: return sizeMB < 100
+    case .medium: return sizeMB >= 100 && sizeGB < 1
+    case .large: return sizeGB >= 1 && sizeGB < 5
+    case .xlarge: return sizeGB >= 5
+    }
+  }
+}
+
+enum FilterLengthOption: String, CaseIterable, Identifiable {
+  case all = "All Lengths"
+  case short = "< 30 sec"
+  case medium = "30 sec - 5 min"
+  case long = "5 min - 30 min"
+  case veryLong = "> 30 min"
+
+  var id: String { self.rawValue }
+
+  func matches(durationSeconds: Double) -> Bool {
+    let minutes = durationSeconds / 60
+
+    switch self {
+    case .all: return true
+    case .short: return durationSeconds < 30
+    case .medium: return durationSeconds >= 30 && minutes < 5
+    case .long: return minutes >= 5 && minutes < 30
+    case .veryLong: return minutes >= 30
+    }
+  }
+}
+
+enum FilterResolutionOption: String, CaseIterable, Identifiable {
+  case all = "All Resolutions"
+  case sd = "SD (< 720p)"
+  case hd = "HD (720p)"
+  case fullHd = "Full HD (1080p)"
+  case uhd4k = "4K (2160p)"
+  case uhd8k = "8K+"
+
+  var id: String { self.rawValue }
+
+  func matches(resolution: String) -> Bool {
+    switch self {
+    case .all: return true
+    case .sd:
+      return resolution.contains("480") || resolution.contains("576")
+        || (!resolution.contains("720") && !resolution.contains("1080")
+          && !resolution.contains("2160") && !resolution.contains("4320"))
+    case .hd: return resolution.contains("720")
+    case .fullHd: return resolution.contains("1080")
+    case .uhd4k: return resolution.contains("2160")
+    case .uhd8k: return resolution.contains("4320") || resolution.contains("8K")
+    }
+  }
+}
+
+enum FilterFileTypeOption: String, CaseIterable, Identifiable {
+  case all = "All Types"
+  case mp4 = "MP4"
+  case mov = "MOV"
+  case avi = "AVI"
+  case mkv = "MKV"
+  case other = "Other"
+
+  var id: String { self.rawValue }
+
+  func matches(fileExtension: String) -> Bool {
+    let ext = fileExtension.lowercased()
+    switch self {
+    case .all: return true
+    case .mp4: return ext == "mp4" || ext == "m4v"
+    case .mov: return ext == "mov"
+    case .avi: return ext == "avi"
+    case .mkv: return ext == "mkv"
+    case .other: return !["mp4", "m4v", "mov", "avi", "mkv"].contains(ext)
+    }
+  }
+}
+
 struct NonFocusableTextFieldStyle: TextFieldStyle {
   func _body(configuration: TextField<Self._Label>) -> some View {
     configuration
@@ -506,6 +599,12 @@ struct ContentView: View {
   @State private var player: AVPlayer? = nil
   @State private var sortOption: SortOption = .name
   @State private var sortAscending: Bool = true
+
+  // MARK: — Filters
+  @State private var filterSize: FilterSizeOption = .all
+  @State private var filterLength: FilterLengthOption = .all
+  @State private var filterResolution: FilterResolutionOption = .all
+  @State private var filterFileType: FilterFileTypeOption = .all
   @State private var isTextFieldDisabled: Bool = true  // Start with text fields disabled
   @FocusState private var hotkeyFieldFocused: Bool
   @State private var deleteHotkey: String = "d"
@@ -561,6 +660,42 @@ struct ContentView: View {
 
   // Global hotkey monitor
   @StateObject private var hotkeyMonitor = GlobalHotkeyMonitor()
+
+  // MARK: — Computed Properties
+  private var filteredVideoURLs: [URL] {
+    return videoURLs.filter { url in
+      // Size filter
+      if filterSize != .all {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+          let size = attrs[.size] as? UInt64
+        else { return false }
+        if !filterSize.matches(sizeBytes: size) { return false }
+      }
+
+      // Length filter
+      if filterLength != .all {
+        guard let info = fileInfo[url] else { return false }
+        if let duration = ContentView.durationInSeconds(from: info.duration) {
+          if !filterLength.matches(durationSeconds: duration) { return false }
+        } else {
+          return false
+        }
+      }
+
+      // Resolution filter
+      if filterResolution != .all {
+        guard let info = fileInfo[url] else { return false }
+        if !filterResolution.matches(resolution: info.resolution) { return false }
+      }
+
+      // File type filter
+      if filterFileType != .all {
+        if !filterFileType.matches(fileExtension: url.pathExtension) { return false }
+      }
+
+      return true
+    }
+  }
 
   var body: some View {
     ZStack {
@@ -975,7 +1110,14 @@ struct ContentView: View {
               }
               .buttonStyle(.plain)
             }
+
             Spacer()
+
+            // Filter Controls
+            filterControls()
+
+            Spacer()
+
             playerSizeSlider(compact: true)
           }
           .padding(.horizontal, 16)
@@ -993,7 +1135,7 @@ struct ContentView: View {
           LazyVGrid(
             columns: [GridItem(.adaptive(minimum: playerPreviewSize), spacing: 8)], spacing: 8
           ) {
-            ForEach(videoURLs, id: \.self) { url in
+            ForEach(filteredVideoURLs, id: \.self) { url in
               VStack(spacing: 4) {
                 if playbackType == .speed {
                   FolderSpeedPreview(
@@ -1095,8 +1237,15 @@ struct ContentView: View {
         }
         Spacer()
         HStack {
-          Text("\(selectedURLs.count) files selected")
-            .foregroundColor(.secondary)
+          VStack(alignment: .leading, spacing: 2) {
+            Text("\(selectedURLs.count) files selected")
+              .foregroundColor(.secondary)
+            if filteredVideoURLs.count != videoURLs.count {
+              Text("Showing \(filteredVideoURLs.count) of \(videoURLs.count) files")
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+          }
           Spacer()
           Button("Delete Selected Files") {
             filesPendingDeletion = Array(selectedURLs)
@@ -2018,7 +2167,14 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
               }
+
               Spacer()
+
+              // Filter Controls
+              filterControls()
+
+              Spacer()
+
               playerSizeSlider(compact: true)
             }
             .padding(.horizontal, 16)
@@ -2034,7 +2190,7 @@ struct ContentView: View {
 
           ScrollView {
             LazyVStack(spacing: 0) {
-              ForEach(videoURLs, id: \.self) { url in
+              ForEach(filteredVideoURLs, id: \.self) { url in
                 BatchListRowView(
                   url: url,
                   times: getClipTimes(for: url, count: numberOfClips),
@@ -2083,8 +2239,15 @@ struct ContentView: View {
           }
           .safeAreaInset(edge: .bottom) {
             HStack {
-              Text("\(batchSelection.filter { $0 }.count) files selected")
-                .foregroundColor(.secondary)
+              VStack(alignment: .leading, spacing: 2) {
+                Text("\(batchSelection.filter { $0 }.count) files selected")
+                  .foregroundColor(.secondary)
+                if filteredVideoURLs.count != videoURLs.count {
+                  Text("Showing \(filteredVideoURLs.count) of \(videoURLs.count) files")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                }
+              }
               Spacer()
               Button("Delete Selected Files") {
                 filesPendingDeletion = zip(videoURLs, batchSelection).filter { $0.1 }.map { $0.0 }
@@ -2245,6 +2408,62 @@ struct ContentView: View {
       }
       .padding(.trailing, 0)
       .padding(.top, compact ? 0 : 4)
+    }
+  }
+
+  // MARK: — Filter Controls
+  @ViewBuilder
+  private func filterControls() -> some View {
+    HStack(spacing: 8) {
+      // Size Filter
+      Picker("Size", selection: $filterSize) {
+        ForEach(FilterSizeOption.allCases) { option in
+          Text(option.rawValue).tag(option)
+        }
+      }
+      .pickerStyle(.menu)
+      .frame(width: 140)
+
+      // Length Filter
+      Picker("Length", selection: $filterLength) {
+        ForEach(FilterLengthOption.allCases) { option in
+          Text(option.rawValue).tag(option)
+        }
+      }
+      .pickerStyle(.menu)
+      .frame(width: 140)
+
+      // Resolution Filter
+      Picker("Resolution", selection: $filterResolution) {
+        ForEach(FilterResolutionOption.allCases) { option in
+          Text(option.rawValue).tag(option)
+        }
+      }
+      .pickerStyle(.menu)
+      .frame(width: 160)
+
+      // File Type Filter
+      Picker("Type", selection: $filterFileType) {
+        ForEach(FilterFileTypeOption.allCases) { option in
+          Text(option.rawValue).tag(option)
+        }
+      }
+      .pickerStyle(.menu)
+      .frame(width: 100)
+
+      // Clear Filters Button
+      if filterSize != .all || filterLength != .all || filterResolution != .all
+        || filterFileType != .all
+      {
+        Button("Clear") {
+          filterSize = .all
+          filterLength = .all
+          filterResolution = .all
+          filterFileType = .all
+        }
+        .buttonStyle(.bordered)
+        .font(.caption)
+      }
     }
   }
 
