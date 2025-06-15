@@ -1457,16 +1457,18 @@ struct ContentView: View {
   // MARK: — Static Thumbnail Generation (Batch List, with loading count)
   private func generateStaticThumbnail(for url: URL, at time: Double, countForLoading: Bool = false)
   {
-    DispatchQueue.global(qos: .userInitiated).async {
+    // Add a small delay to prevent overwhelming the system
+    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.01) {
       let asset = AVAsset(url: url)
       let generator = AVAssetImageGenerator(asset: asset)
       generator.appliesPreferredTrackTransform = true
-      generator.maximumSize = CGSize(width: 1200, height: 675)  // Much higher resolution for crisp thumbnails
-      generator.requestedTimeToleranceBefore = .zero
-      generator.requestedTimeToleranceAfter = .zero
+      generator.maximumSize = CGSize(width: 600, height: 338)  // Reduced size for better performance
+      generator.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
+      generator.requestedTimeToleranceAfter = CMTime(seconds: 0.1, preferredTimescale: 600)
 
       // Use the provided time directly since we already set it to 0.02 for speed mode in loadVideosAndThumbnails
-      let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+      let actualTime = max(time, 0.1)  // Ensure we don't try to get frame at 0
+      let cmTime = CMTime(seconds: actualTime, preferredTimescale: 600)
 
       if let cgImage = try? generator.copyCGImage(at: cmTime, actualTime: nil) {
         let image = Image(decorative: cgImage, scale: 1.0)
@@ -1773,21 +1775,16 @@ struct ContentView: View {
     }
 
     private func setupPlayer() {
-      do {
-        let asset = AVURLAsset(url: url)
-        let d = asset.duration.seconds
-        let times = computeStartTimes(duration: d, count: numberOfClips)
-        duration = d
-        startTimes = times
-        let item = AVPlayerItem(asset: asset)
-        let newPlayer = AVPlayer(playerItem: item)
-        newPlayer.isMuted = isMuted
-        newPlayer.actionAtItemEnd = .none
-        player = newPlayer
-      } catch {
-        errorMessage = "Failed to initialize video player: \(error.localizedDescription)"
-        showFallback = false
-      }
+      let asset = AVURLAsset(url: url)
+      let d = asset.duration.seconds
+      let times = computeStartTimes(duration: d, count: numberOfClips)
+      duration = d
+      startTimes = times
+      let item = AVPlayerItem(asset: asset)
+      let newPlayer = AVPlayer(playerItem: item)
+      newPlayer.isMuted = isMuted
+      newPlayer.actionAtItemEnd = .none
+      player = newPlayer
     }
 
     private func playClip(index: Int) {
@@ -2188,11 +2185,12 @@ struct ContentView: View {
             let asset = AVURLAsset(url: url)
             let generator = AVAssetImageGenerator(asset: asset)
             generator.appliesPreferredTrackTransform = true
-            generator.maximumSize = CGSize(width: 1200, height: 675)  // Much higher resolution for crisp thumbnails
-            generator.requestedTimeToleranceBefore = .zero
-            generator.requestedTimeToleranceAfter = .zero
-            // Use the same 2% offset as the video preview
-            let cmTime = CMTime(seconds: asset.duration.seconds * 0.02, preferredTimescale: 600)
+            generator.maximumSize = CGSize(width: 600, height: 338)  // Reduced size for better performance
+            generator.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
+            generator.requestedTimeToleranceAfter = CMTime(seconds: 0.1, preferredTimescale: 600)
+            // Use the same 2% offset as the video preview, but ensure it's not 0
+            let time = max(asset.duration.seconds * 0.02, 0.1)
+            let cmTime = CMTime(seconds: time, preferredTimescale: 600)
             let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
             let image = Image(decorative: cgImage, scale: 1.0)
             ContentView.thumbnailCache[url] = image
@@ -2294,12 +2292,12 @@ struct VideoThumbnailView: View {
     do {
       let asset = AVURLAsset(url: url)
       let duration = asset.duration.seconds
-      let time = max(duration * 0.02, 0.0)  // This matches the hover preview start time
+      let time = max(duration * 0.02, 0.1)  // Ensure we don't try to get frame at 0
       let generator = AVAssetImageGenerator(asset: asset)
       generator.appliesPreferredTrackTransform = true
-      generator.maximumSize = CGSize(width: 1200, height: 675)  // Much higher resolution for crisp thumbnails
-      generator.requestedTimeToleranceBefore = .zero
-      generator.requestedTimeToleranceAfter = .zero
+      generator.maximumSize = CGSize(width: 600, height: 338)  // Reduced size for better performance
+      generator.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
+      generator.requestedTimeToleranceAfter = CMTime(seconds: 0.1, preferredTimescale: 600)
       let cmTime = CMTime(seconds: time, preferredTimescale: 600)
       let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
       let image = Image(decorative: cgImage, scale: 1.0)
@@ -3906,10 +3904,11 @@ struct FolderSpeedPreview: View {
           let asset = AVURLAsset(url: url)
           let generator = AVAssetImageGenerator(asset: asset)
           generator.appliesPreferredTrackTransform = true
-          generator.maximumSize = CGSize(width: 1200, height: 675)  // Much higher resolution for crisp thumbnails
-          generator.requestedTimeToleranceBefore = .zero
-          generator.requestedTimeToleranceAfter = .zero
-          let cmTime = CMTime(seconds: asset.duration.seconds * 0.02, preferredTimescale: 600)
+          generator.maximumSize = CGSize(width: 600, height: 338)  // Reduced size for better performance
+          generator.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
+          generator.requestedTimeToleranceAfter = CMTime(seconds: 0.1, preferredTimescale: 600)
+          let time = max(asset.duration.seconds * 0.02, 0.1)  // Ensure we don't try to get frame at 0
+          let cmTime = CMTime(seconds: time, preferredTimescale: 600)
           let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
           let image = Image(decorative: cgImage, scale: 1.0)
           ContentView.thumbnailCache[url] = image
