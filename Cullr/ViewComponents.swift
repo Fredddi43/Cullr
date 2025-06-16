@@ -21,57 +21,152 @@ struct BatchListRowView: View {
   @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
 
   var body: some View {
-    HStack {
-      HStack(spacing: 8) {
-        if playbackType == .clips {
-          ForEach(times, id: \.self) { time in
+    HStack(spacing: 12) {
+      // Video preview section
+      if playbackType == .clips && times.count > 1 {
+        // Show clips side-by-side when in clips mode
+        let clipWidth = playerPreviewSize * 0.545  // Same size as folder view
+        let clipHeight = playerPreviewSize * 0.309  // Same size as folder view
+
+        HStack(spacing: 2) {
+          ForEach(Array(times.enumerated()), id: \.offset) { index, time in
+            ZStack {
+              // Background thumbnail
+              if let thumbnail = thumbnail {
+                thumbnail
+                  .resizable()
+                  .aspectRatio(16 / 9, contentMode: .fill)
+                  .frame(width: clipWidth, height: clipHeight)
+                  .clipped()
+                  .cornerRadius(6)
+              } else {
+                Rectangle()
+                  .fill(Color.gray.opacity(0.3))
+                  .frame(width: clipWidth, height: clipHeight)
+                  .cornerRadius(6)
+              }
+
+              // Individual clip preview - show for all clips when hovered
+              if isRowHovered {
+                SingleClipPreview(
+                  url: url,
+                  startTime: time,
+                  isMuted: isMuted
+                )
+                .frame(width: clipWidth, height: clipHeight)
+                .cornerRadius(6)
+              }
+
+              // Clip number overlay
+              VStack {
+                Spacer()
+                HStack {
+                  Spacer()
+                  Text("\(index + 1)")
+                    .font(.caption2)
+                    .fontWeight(.bold)
+                    .foregroundColor(.white)
+                    .padding(2)
+                    .background(Color.black.opacity(0.6))
+                    .cornerRadius(3)
+                    .padding(4)
+                }
+              }
+            }
+            .overlay(
+              RoundedRectangle(cornerRadius: 6)
+                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
+            )
+          }
+        }
+        .frame(
+          width: clipWidth * CGFloat(times.count) + CGFloat((times.count - 1) * 2),
+          height: clipHeight)  // Dynamic width based on actual clip count
+      } else {
+        // Single preview for speed mode or single clip
+        let singleWidth = playerPreviewSize * 0.545
+        let singleHeight = playerPreviewSize * 0.309
+
+        ZStack {
+          // Background thumbnail
+          if let thumbnail = thumbnail {
+            thumbnail
+              .resizable()
+              .aspectRatio(contentMode: .fill)
+              .frame(width: singleWidth, height: singleHeight)
+              .clipped()
+              .cornerRadius(8)
+          } else {
+            Rectangle()
+              .fill(Color.gray.opacity(0.3))
+              .frame(width: singleWidth, height: singleHeight)
+              .cornerRadius(8)
+          }
+
+          // Hover preview overlay
+          if isRowHovered {
             HoverPreviewCard(
               url: url,
-              thumbnail: staticThumbnails[thumbnailKey(url: url, time: time)],
+              times: playbackType == .clips ? times : [0.02],
               isMuted: isMuted,
-              startTime: time,
-              forcePlay: isRowHovered,
               playbackType: playbackType,
-              speedOption: speedOption
+              speedOption: speedOption,
+              forcePlay: true
             )
-            .frame(width: playerPreviewSize * 0.545, height: playerPreviewSize * 0.309)
-            .cornerRadius(10)
+            .frame(width: singleWidth, height: singleHeight)
+            .cornerRadius(8)
           }
-        } else {
-          // In speed mode, show only one preview at 2% offset
-          HoverPreviewCard(
-            url: url,
-            thumbnail: thumbnail,
-            isMuted: isMuted,
-            startTime: 0.02,
-            forcePlay: isRowHovered,
-            playbackType: playbackType,
-            speedOption: speedOption
-          )
-          .frame(width: playerPreviewSize * 0.545, height: playerPreviewSize * 0.309)
-          .cornerRadius(10)
         }
+        .overlay(
+          RoundedRectangle(cornerRadius: 8)
+            .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+        )
       }
-      .overlay(
-        RoundedRectangle(cornerRadius: 10)
-          .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
-      )
 
+      // File info section
       VStack(alignment: .leading, spacing: 4) {
         Text(url.lastPathComponent)
           .lineLimit(2)
           .truncationMode(.middle)
-          .font(.body)
+          .font(.system(size: 13, weight: .medium))
+          .foregroundColor(.primary)
+
         if let info = fileInfo {
-          Text("\(info.size) • \(info.duration)")
-            .font(.caption)
-            .foregroundColor(.secondary)
+          HStack(spacing: 8) {
+            Text(info.size)
+              .font(.caption)
+              .foregroundColor(.secondary)
+
+            Text("•")
+              .font(.caption)
+              .foregroundColor(.secondary)
+
+            Text(info.duration)
+              .font(.caption)
+              .foregroundColor(.secondary)
+
+            if info.resolution != "Unknown" {
+              Text("•")
+                .font(.caption)
+                .foregroundColor(.secondary)
+
+              Text(info.resolution)
+                .font(.caption)
+                .foregroundColor(.secondary)
+            }
+          }
         }
       }
-      .frame(width: playerPreviewSize, alignment: .leading)
+      .frame(maxWidth: .infinity, alignment: .leading)
 
       Spacer()
     }
+    .padding(.horizontal, 16)
+    .padding(.vertical, 12)
+    .background(
+      RoundedRectangle(cornerRadius: 8)
+        .fill(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
+    )
     .contentShape(Rectangle())
     .onHover { hovering in
       onHoverChanged(hovering)
@@ -79,29 +174,19 @@ struct BatchListRowView: View {
     .onTapGesture {
       isSelected.toggle()
     }
-    .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
-    .padding(.vertical, isSelected ? 12 : 8)
-    .padding(.horizontal, 16)
     .task {
-      // Load thumbnail exactly like folder view
-      if let cached = ThumbnailCache.shared.get(url) {
+      // Load thumbnail for fallback display - only if not already loaded
+      guard thumbnail == nil else { return }
+
+      if let cached = ThumbnailCache.shared.get(for: thumbnailKey(url: url, time: 1.0)) {
         thumbnail = cached
       } else {
-        do {
-          let asset = AVURLAsset(url: url)
-          let generator = AVAssetImageGenerator(asset: asset)
-          generator.appliesPreferredTrackTransform = true
-          generator.maximumSize = CGSize(width: 600, height: 338)
-          generator.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
-          generator.requestedTimeToleranceAfter = CMTime(seconds: 0.1, preferredTimescale: 600)
-          let time = max(asset.duration.seconds * 0.02, 0.1)
-          let cmTime = CMTime(seconds: time, preferredTimescale: 600)
-          let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
-          let image = Image(decorative: cgImage, scale: 1.0)
-          ThumbnailCache.shared.set(url, image: image)
-          thumbnail = image
-        } catch {
-          // Handle error silently
+        // Delay thumbnail generation to reduce load during scrolling
+        try? await Task.sleep(nanoseconds: 100_000_000)  // 0.1 second delay
+
+        if let generated = await generateStaticThumbnail(for: url) {
+          thumbnail = generated
+          ThumbnailCache.shared.set(generated, for: thumbnailKey(url: url, time: 1.0))
         }
       }
     }
@@ -110,12 +195,13 @@ struct BatchListRowView: View {
 
 // MARK: - Filter Controls
 
-/// Filter controls for sorting and filtering video files
+/// Filter controls for sorting and filtering video files with integrated size slider
 struct FilterControls: View {
   @Binding var filterSize: FilterSizeOption
   @Binding var filterLength: FilterLengthOption
   @Binding var filterResolution: FilterResolutionOption
   @Binding var filterFileType: FilterFileTypeOption
+  @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
 
   var body: some View {
     HStack(spacing: 8) {
@@ -167,6 +253,21 @@ struct FilterControls: View {
         }
         .buttonStyle(.bordered)
         .font(.caption)
+      }
+
+      Spacer()
+
+      // Player Size Slider (integrated)
+      HStack(spacing: 8) {
+        Text("Size:")
+          .font(.caption)
+          .foregroundColor(.secondary)
+        Slider(value: $playerPreviewSize, in: 100...400, step: 1)
+          .frame(width: 120)
+        Text("\(Int(playerPreviewSize))")
+          .font(.caption)
+          .foregroundColor(.secondary)
+          .frame(width: 30, alignment: .trailing)
       }
     }
   }

@@ -1,570 +1,595 @@
 // ContentView.swift
+// Ultra-lean main view using centralized state management
 
 import AVFoundation
 import AppKit
 import SwiftUI
 
-/// Main application content view - now modular and clean
+/// Main application content view - optimized for performance and modularity
 struct ContentView: View {
-  // MARK: - Basic State
-  @State private var videoURLs: [URL] = []
-  @State private var folderURL: URL? = nil
-  @State private var folderAccessing: Bool = false
-  @State private var isPrepared: Bool = false
-  @State private var currentIndex: Int = 0
-  @State private var player: AVPlayer? = nil
-  @State private var sortOption: SortOption = .name
-  @State private var sortAscending: Bool = true
-
-  // MARK: - Filters
-  @State private var filterSize: FilterSizeOption = .all
-  @State private var filterLength: FilterLengthOption = .all
-  @State private var filterResolution: FilterResolutionOption = .all
-  @State private var filterFileType: FilterFileTypeOption = .all
-  @State private var isTextFieldDisabled: Bool = true
-  @FocusState private var hotkeyFieldFocused: Bool
-  @State private var deleteHotkey: String = "d"
-  @State private var keepHotkey: String = "k"
-  @State private var isMuted: Bool = true
-  @State private var playbackMode: PlaybackMode = .folderView
-  @State private var playbackType: PlaybackType = .clips
-  @State private var speedOption: SpeedOption = .x2
-
-  // MARK: - Selections
-  @State private var batchSelection: [Bool] = []
-  @State private var selectedURLs: Set<URL> = []
-  @State private var selectionOrder: [URL] = []
-  @State private var staticThumbnails: [String: Image] = [:]
-
-  // MARK: - Media Info
-  @State private var totalFilesText: String = ""
-  @State private var totalSizeText: String = ""
-  @State private var fileInfo: [URL: FileInfo] = [:]
-
-  // MARK: - State
-  @State private var isLoadingThumbnails: Bool = false
-  @State private var thumbnailsToLoad: Int = 0
-  @State private var thumbnailsLoaded: Int = 0
-  @State private var hoveredBatchRow: URL? = nil
-  @State private var lastSelectedItem: URL? = nil
-
-  // MARK: - Configuration
-  @State private var numberOfClips: Int = 5
-  @State private var clipLength: Int = 3
-  @State private var tempNumberOfClips: Int = 5
-  @State private var tempClipLength: Int = 3
-
-  // MARK: - Deletion States
-  @State private var showDeleteConfirmation = false
-  @State private var filesPendingDeletion: [URL] = []
-  @State private var showFolderDeleteConfirmation = false
-  @State private var folderPendingDeletion: URL? = nil
-  @State private var folderDeletionInfo: (fileCount: Int, size: String, name: String)? = nil
-  @State private var showAlert = false
-  @State private var alertType: AlertType = .fileDelete
-
-  // MARK: - Folder Collection
-  @State private var folderCollection: [URL] = []
-  @State private var currentFolderIndex: Int = 0
-  @State private var viewReloadID = UUID()
-
-  // MARK: - Player State
+  @StateObject private var appState = AppState()
   @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
-
-  // MARK: - Global Managers
-  @StateObject private var hotkeyMonitor = GlobalHotkeyMonitor()
-  private let thumbnailCache = ThumbnailCache.shared
-
-  // MARK: - Computed Properties
-  private var filteredVideoURLs: [URL] {
-    return videoURLs.filter { url in
-      // Size filter
-      if filterSize != .all {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-          let size = attrs[.size] as? UInt64
-        else { return false }
-        if !filterSize.matches(sizeBytes: size) { return false }
-      }
-
-      // Length filter
-      if filterLength != .all {
-        guard let info = fileInfo[url] else { return false }
-        if let duration = durationInSeconds(from: info.duration) {
-          if !filterLength.matches(durationSeconds: duration) { return false }
-        } else {
-          return false
-        }
-      }
-
-      // Resolution filter
-      if filterResolution != .all {
-        guard let info = fileInfo[url] else { return false }
-        if !filterResolution.matches(resolution: info.resolution) { return false }
-      }
-
-      // File type filter
-      if filterFileType != .all {
-        if !filterFileType.matches(fileExtension: url.pathExtension) { return false }
-      }
-
-      return true
-    }
-  }
-
-  private var isFolderCollectionMode: Bool { folderCollection.count > 1 }
+  @FocusState private var hotkeyFieldFocused: Bool
 
   var body: some View {
     ZStack {
-      Color.clear
-        .background(.ultraThinMaterial)
-        .ignoresSafeArea()
-        .contentShape(Rectangle())
-        .onTapGesture {
-          DispatchQueue.main.async {
-            NSApp.keyWindow?.makeFirstResponder(nil)
-          }
-        }
-        .onAppear {
-          configureWindowTransparency(folderName: folderURL?.lastPathComponent)
-          setupHotkeyMonitoring()
+      mainContent
 
-          // Re-enable text fields after a short delay
-          DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            isTextFieldDisabled = false
-          }
-        }
-        .onDisappear {
-          hotkeyMonitor.stopMonitoring()
-        }
-
-      mainContentView
-
-      // Loading overlay
-      if isLoadingThumbnails {
-        LoadingOverlay(
-          thumbnailsLoaded: thumbnailsLoaded,
-          thumbnailsToLoad: thumbnailsToLoad
-        )
-      }
-
-      // Folder Collection Bottom Bar
-      if isFolderCollectionMode {
-        FolderCollectionBottomBar(
-          folderURL: folderURL,
-          currentFolderIndex: currentFolderIndex,
-          folderCollectionCount: folderCollection.count,
-          onPreviousFolder: previousFolder,
-          onNextFolder: nextFolder,
-          onDeleteFolder: {
-            Task {
-              await prepareFolderDeletion()
-            }
-          }
-        )
-      }
-    }
-    .frame(minWidth: 1200, minHeight: 800)
-  }
-
-  // MARK: - Main Content View (Extracted to avoid compiler complexity)
-  private var mainContentView: some View {
-    VStack(spacing: 0) {
-      settingsBar
-      Divider()
-
-      if folderURL == nil {
-        Spacer()
-        Text("Select a folder to begin")
-          .font(.headline)
-        Spacer()
-      } else {
-        switch playbackMode {
-        case .single:
-          singleClipView
-        case .sideBySide:
-          sideBySideClipsView
-        case .batchList:
-          batchListView
-        case .folderView:
-          folderView
-        }
-      }
-    }
-    .id(viewReloadID)
-    .alert(isPresented: $showAlert) {
-      createAlertForType()
-    }
-  }
-
-  // MARK: - Settings Bar
-  private var settingsBar: some View {
-    SettingsBar(
-      folderURL: folderURL,
-      playbackType: playbackType,
-      tempNumberOfClips: tempNumberOfClips,
-      tempClipLength: tempClipLength,
-      speedOption: speedOption,
-      deleteHotkey: deleteHotkey,
-      keepHotkey: keepHotkey,
-      isMuted: isMuted,
-      totalFilesText: totalFilesText,
-      totalSizeText: totalSizeText,
-      isTextFieldDisabled: isTextFieldDisabled,
-      hotkeyFieldFocused: $hotkeyFieldFocused,
-      playbackMode: playbackMode,
-      onSelectFolder: selectFolder,
-      onPlaybackTypeChange: { playbackType = $0 },
-      onNumberOfClipsChange: { tempNumberOfClips = $0 },
-      onClipLengthChange: { tempClipLength = $0 },
-      onSpeedOptionChange: { speedOption = $0 },
-      onDeleteHotkeyChange: { deleteHotkey = $0 },
-      onKeepHotkeyChange: { keepHotkey = $0 },
-      onMuteToggle: { isMuted.toggle() },
-      onGoAction: {
-        Task {
-          numberOfClips = tempNumberOfClips
-          clipLength = tempClipLength
-          if let folder = folderURL {
-            await loadVideosAndThumbnails(from: folder)
-            viewReloadID = UUID()
-          }
-        }
-      },
-      onPlaybackModeChange: { newMode in
-        playbackMode = newMode
-        if newMode != .folderView {
-          Task {
-            await initializeForCurrentMode()
-          }
-        } else {
-          syncBatchSelectionFromSelectedURLs()
-        }
-      }
-    )
-  }
-
-  // MARK: - View Modes
-  private var singleClipView: some View {
-    VStack(spacing: 0) {
-      if currentIndex < videoURLs.count {
-        let url = videoURLs[currentIndex]
-        if !FileManager.default.fileExists(atPath: url.path) {
-          VStack {
+      // Non-blocking progress indicator
+      if appState.fileManager.isLoading && appState.fileManager.thumbnailsToLoad > 0 {
+        VStack {
+          Spacer()
+          HStack {
             Spacer()
-            Text("File does not exist: \(url.lastPathComponent)")
-              .foregroundColor(.red)
-              .font(.headline)
-            Spacer()
-          }
-        } else {
-          if playbackType == .speed {
-            SpeedPlayer(
-              url: url,
-              speedOption: $speedOption,
-              isMuted: $isMuted
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .aspectRatio(16 / 9, contentMode: .fit)
-          } else {
-            ClipLoopingPlayer(
-              url: url,
-              numberOfClips: numberOfClips,
-              clipLength: clipLength,
-              isMuted: $isMuted
-            )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .aspectRatio(16 / 9, contentMode: .fit)
-          }
-        }
-      }
-
-      // Navigation controls
-      HStack {
-        Button("Delete") {
-          deleteCurrentVideo()
-        }
-        .keyboardShortcut(KeyEquivalent(Character(deleteHotkey)), modifiers: [])
-
-        Spacer()
-
-        Text("\(currentIndex + 1) of \(videoURLs.count)")
-          .font(.caption)
-
-        Spacer()
-
-        Button("Keep") {
-          skipCurrentVideo()
-        }
-        .keyboardShortcut(KeyEquivalent(Character(keepHotkey)), modifiers: [])
-      }
-      .padding()
-    }
-  }
-
-  private var sideBySideClipsView: some View {
-    VStack(spacing: 16) {
-      HStack(spacing: 16) {
-        // Left video
-        if currentIndex < videoURLs.count {
-          let leftURL = videoURLs[currentIndex]
-          VStack {
-            if playbackType == .speed {
-              SpeedPlayer(
-                url: leftURL,
-                speedOption: $speedOption,
-                isMuted: $isMuted
+            VStack(spacing: 8) {
+              ProgressView(
+                value: Double(appState.fileManager.thumbnailsLoaded),
+                total: Double(appState.fileManager.thumbnailsToLoad)
               )
-            } else {
-              ClipLoopingPlayer(
-                url: leftURL,
-                numberOfClips: numberOfClips,
-                clipLength: clipLength,
-                isMuted: $isMuted
+              .frame(width: 200)
+              Text(
+                "Loading file info: \(appState.fileManager.thumbnailsLoaded)/\(appState.fileManager.thumbnailsToLoad)"
               )
-            }
-            Text(leftURL.lastPathComponent)
               .font(.caption)
-              .lineLimit(1)
-          }
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .aspectRatio(16 / 9, contentMode: .fit)
-        }
-
-        // Right video
-        if currentIndex + 1 < videoURLs.count {
-          let rightURL = videoURLs[currentIndex + 1]
-          VStack {
-            if playbackType == .speed {
-              SpeedPlayer(
-                url: rightURL,
-                speedOption: $speedOption,
-                isMuted: $isMuted
-              )
-            } else {
-              ClipLoopingPlayer(
-                url: rightURL,
-                numberOfClips: numberOfClips,
-                clipLength: clipLength,
-                isMuted: $isMuted
-              )
+              .foregroundColor(.secondary)
             }
-            Text(rightURL.lastPathComponent)
-              .font(.caption)
-              .lineLimit(1)
-          }
-          .frame(maxWidth: .infinity, maxHeight: .infinity)
-          .aspectRatio(16 / 9, contentMode: .fit)
-        }
-      }
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-      // Controls
-      HStack {
-        Button("Delete Left") {
-          deleteCurrentVideo()
-        }
-        .keyboardShortcut(KeyEquivalent(Character(deleteHotkey)), modifiers: [])
-
-        Button("Delete Right") {
-          deleteVideo(at: currentIndex + 1)
-        }
-        .disabled(currentIndex + 1 >= videoURLs.count)
-
-        Spacer()
-
-        Text("\(currentIndex + 1)-\(min(currentIndex + 2, videoURLs.count)) of \(videoURLs.count)")
-          .font(.caption)
-
-        Spacer()
-
-        Button("Keep Both") {
-          skipCurrentVideo()
-          if currentIndex < videoURLs.count {
-            skipCurrentVideo()  // Skip the second one too
+            .padding()
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .padding()
           }
         }
-        .keyboardShortcut(KeyEquivalent(Character(keepHotkey)), modifiers: [])
       }
-      .padding()
+    }
+    .onAppear {
+      appState.setupHotkeyMonitoring()
+    }
+    .alert(isPresented: $appState.showAlert) {
+      createAlert()
     }
   }
 
-  private var batchListView: some View {
-    VStack(spacing: 0) {
-      // Filter controls
-      FilterControls(
-        filterSize: $filterSize,
-        filterLength: $filterLength,
-        filterResolution: $filterResolution,
-        filterFileType: $filterFileType
-      )
-      .padding(.horizontal)
+  // MARK: - Main Content
 
-      Divider()
-
-      // List of videos
-      ScrollView {
-        LazyVStack(spacing: 1) {
-          ForEach(Array(filteredVideoURLs.enumerated()), id: \.element) { index, url in
-            BatchListRowView(
-              url: url,
-              times: getClipTimes(for: url, count: numberOfClips),
-              staticThumbnails: staticThumbnails,
-              isMuted: isMuted,
-              playbackType: playbackType,
-              speedOption: speedOption,
-              isSelected: Binding(
-                get: { selectedURLs.contains(url) },
-                set: { _ in toggleSelection(for: url) }
-              ),
-              fileInfo: fileInfo[url],
-              isRowHovered: hoveredBatchRow == url,
-              onHoverChanged: { hovering in
-                hoveredBatchRow = hovering ? url : nil
-              }
-            )
-          }
-        }
+  @ViewBuilder
+  private var mainContent: some View {
+    if appState.folderURL == nil {
+      welcomeView
+    } else {
+      switch appState.playbackMode {
+      case .folderView:
+        folderView
+      case .batchList:
+        batchListView
+      case .single:
+        singleVideoView
+      case .sideBySide:
+        sideBySideView
       }
-
-      Divider()
-
-      // Batch actions
-      HStack {
-        Button("Select All") {
-          selectedURLs = Set(filteredVideoURLs)
-          syncBatchSelectionFromSelectedURLs()
-        }
-
-        Button("Deselect All") {
-          selectedURLs.removeAll()
-          syncBatchSelectionFromSelectedURLs()
-        }
-
-        Spacer()
-
-        Text("\(selectedURLs.count) selected")
-          .font(.caption)
-
-        Spacer()
-
-        Button("Delete Selected") {
-          deleteSelectedVideos()
-        }
-        .disabled(selectedURLs.isEmpty)
-
-        Button("Preview Selected") {
-          let urlsArray = selectionOrder.filter { selectedURLs.contains($0) }
-          if !urlsArray.isEmpty {
-            QuickLookPreviewCoordinator.shared.preview(urls: urlsArray)
-          }
-        }
-        .disabled(selectedURLs.isEmpty)
-      }
-      .padding()
     }
   }
+
+  // MARK: - Welcome View
+
+  private var welcomeView: some View {
+    VStack(spacing: 24) {
+      Image(systemName: "folder.badge.plus")
+        .font(.system(size: 64))
+        .foregroundColor(.accentColor)
+
+      Text("Select a Folder")
+        .font(.largeTitle)
+        .fontWeight(.bold)
+
+      Text("Choose a folder containing video files to get started")
+        .font(.body)
+        .foregroundColor(.secondary)
+
+      Button("Select Folder") {
+        selectFolder()
+      }
+      .buttonStyle(.borderedProminent)
+      .controlSize(.large)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+  }
+
+  // MARK: - Folder View
 
   private var folderView: some View {
     VStack(spacing: 0) {
-      folderFilterControls
-      folderVideoGrid
-      folderSelectionControls
-    }
-  }
+      SettingsBar(
+        folderURL: appState.folderURL,
+        playbackType: appState.playbackType,
+        tempNumberOfClips: appState.numberOfClips,
+        tempClipLength: appState.clipLength,
+        speedOption: appState.speedOption,
+        deleteHotkey: appState.deleteHotkey,
+        keepHotkey: appState.keepHotkey,
+        isMuted: appState.isMuted,
+        totalFilesText: appState.totalFilesText,
+        totalSizeText: appState.totalSizeText,
+        isTextFieldDisabled: false,
+        hotkeyFieldFocused: $hotkeyFieldFocused,
+        playbackMode: appState.playbackMode,
+        onSelectFolder: selectFolder,
+        onPlaybackTypeChange: { appState.playbackType = $0 },
+        onNumberOfClipsChange: { appState.numberOfClips = $0 },
+        onClipLengthChange: { appState.clipLength = $0 },
+        onSpeedOptionChange: { appState.speedOption = $0 },
+        onDeleteHotkeyChange: { appState.deleteHotkey = $0 },
+        onKeepHotkeyChange: { appState.keepHotkey = $0 },
+        onMuteToggle: { appState.isMuted.toggle() },
+        onGoAction: {
+          Task {
+            if let folder = appState.folderURL {
+              await appState.loadVideosAndThumbnails(from: folder)
+            }
+          }
+        },
+        onPlaybackModeChange: { appState.playbackMode = $0 }
+      )
 
-  // MARK: - Folder View Components
+      Divider()
 
-  private var folderFilterControls: some View {
-    VStack(spacing: 0) {
-      // Filter controls
       FilterControls(
-        filterSize: $filterSize,
-        filterLength: $filterLength,
-        filterResolution: $filterResolution,
-        filterFileType: $filterFileType
+        filterSize: $appState.filterSize,
+        filterLength: $appState.filterLength,
+        filterResolution: $appState.filterResolution,
+        filterFileType: $appState.filterFileType
       )
       .padding(.horizontal)
 
       Divider()
 
-      // Player size slider
-      PlayerSizeSlider(compact: false)
-        .padding(.horizontal)
+      folderVideoGrid
 
-      Divider()
+      if !appState.selectedURLs.isEmpty {
+        Divider()
+        folderSelectionControls
+      }
     }
   }
 
   private var folderVideoGrid: some View {
     ScrollView {
-      videoGridContent
-        .padding()
+      LazyVGrid(columns: gridColumns, spacing: 16) {
+        ForEach(appState.filteredVideoURLs, id: \.self) { url in
+          folderVideoCard(url: url)
+        }
+      }
+      .padding(.horizontal, 16)
+      .padding(.vertical, 16)
     }
   }
 
-  private var videoGridContent: some View {
-    LazyVGrid(
-      columns: Array(
-        repeating: GridItem(.flexible(), spacing: 8), count: Int(1200 / (playerPreviewSize + 8))),
-      spacing: 8
-    ) {
-      ForEach(Array(filteredVideoURLs.enumerated()), id: \.element) { (index: Int, url: URL) in
-        if playbackType == .speed {
+  private var gridColumns: [GridItem] {
+    let itemWidth = playerPreviewSize * 0.545
+    let spacing: CGFloat = 16
+
+    // Use a single adaptive column that will automatically create multiple columns
+    // based on available space and item size
+    return [
+      GridItem(.adaptive(minimum: itemWidth, maximum: itemWidth), spacing: spacing)
+    ]
+  }
+
+  private func folderVideoCard(url: URL) -> some View {
+    VStack(spacing: 8) {
+      ZStack {
+        if appState.playbackType == .speed {
           FolderSpeedPreview(
             url: url,
-            isMuted: isMuted,
-            speedOption: speedOption
+            isMuted: appState.isMuted,
+            speedOption: appState.speedOption,
+            forcePlay: true
           )
         } else {
           FolderHoverLoopPreview(
             url: url,
-            isMuted: isMuted,
-            numberOfClips: numberOfClips,
-            clipLength: clipLength,
-            playbackType: playbackType,
-            speedOption: speedOption
+            isMuted: appState.isMuted,
+            forcePlay: true
           )
         }
       }
+      .frame(width: playerPreviewSize * 0.545, height: playerPreviewSize * 0.309)
+      .cornerRadius(12)
+      .overlay(
+        RoundedRectangle(cornerRadius: 12)
+          .stroke(
+            appState.selectedURLs.contains(url) ? Color.accentColor : Color.clear, lineWidth: 3)
+      )
+
+      VStack(alignment: .leading, spacing: 4) {
+        Text(url.lastPathComponent)
+          .font(.caption)
+          .lineLimit(2)
+          .truncationMode(.middle)
+
+        if let info = appState.fileManager.fileInfo[url] {
+          Text("\(info.size) • \(info.duration)")
+            .font(.caption2)
+            .foregroundColor(.secondary)
+        }
+      }
+      .frame(width: playerPreviewSize * 0.545, alignment: .leading)
+    }
+    .onTapGesture {
+      appState.toggleSelection(for: url)
+    }
+    .background(appState.selectedURLs.contains(url) ? Color.accentColor.opacity(0.1) : Color.clear)
+    .cornerRadius(12)
+  }
+
+  private var folderSelectionControls: some View {
+    HStack {
+      Button("Deselect All") {
+        appState.deselectAll()
+      }
+
+      Spacer()
+
+      Text("\(appState.selectedURLs.count) selected")
+        .font(.caption)
+
+      Spacer()
+
+      Button("Delete Selected") {
+        appState.deleteSelectedVideos()
+      }
+
+      Button("Preview Selected") {
+        let urlsArray = appState.selectionOrder.filter { appState.selectedURLs.contains($0) }
+        if !urlsArray.isEmpty {
+          QuickLookPreviewCoordinator.shared.preview(urls: urlsArray)
+        }
+      }
+    }
+    .padding()
+  }
+
+  // MARK: - Batch List View
+
+  private var batchListView: some View {
+    VStack(spacing: 0) {
+      // Main settings bar
+      SettingsBar(
+        folderURL: appState.folderURL,
+        playbackType: appState.playbackType,
+        tempNumberOfClips: appState.numberOfClips,
+        tempClipLength: appState.clipLength,
+        speedOption: appState.speedOption,
+        deleteHotkey: appState.deleteHotkey,
+        keepHotkey: appState.keepHotkey,
+        isMuted: appState.isMuted,
+        totalFilesText: appState.totalFilesText,
+        totalSizeText: appState.totalSizeText,
+        isTextFieldDisabled: false,
+        hotkeyFieldFocused: $hotkeyFieldFocused,
+        playbackMode: appState.playbackMode,
+        onSelectFolder: selectFolder,
+        onPlaybackTypeChange: { appState.playbackType = $0 },
+        onNumberOfClipsChange: { appState.numberOfClips = $0 },
+        onClipLengthChange: { appState.clipLength = $0 },
+        onSpeedOptionChange: { appState.speedOption = $0 },
+        onDeleteHotkeyChange: { appState.deleteHotkey = $0 },
+        onKeepHotkeyChange: { appState.keepHotkey = $0 },
+        onMuteToggle: { appState.isMuted.toggle() },
+        onGoAction: {
+          Task {
+            if let folder = appState.folderURL {
+              await appState.loadVideosAndThumbnails(from: folder)
+            }
+          }
+        },
+        onPlaybackModeChange: { appState.playbackMode = $0 }
+      )
+
+      Divider()
+
+      // Filter controls
+      VStack(spacing: 8) {
+        FilterControls(
+          filterSize: $appState.filterSize,
+          filterLength: $appState.filterLength,
+          filterResolution: $appState.filterResolution,
+          filterFileType: $appState.filterFileType
+        )
+        .padding(.horizontal)
+
+        HStack {
+          Text("\(appState.filteredVideoURLs.count) videos")
+            .font(.caption)
+            .foregroundColor(.secondary)
+
+          Spacer()
+
+          if !appState.selectedURLs.isEmpty {
+            Text("\(appState.selectedURLs.count) selected")
+              .font(.caption)
+              .foregroundColor(.accentColor)
+          }
+        }
+        .padding(.horizontal)
+      }
+      .padding(.vertical, 8)
+
+      Divider()
+
+      // Video list
+      ScrollView {
+        LazyVStack(spacing: 12) {
+          ForEach(Array(appState.filteredVideoURLs.enumerated()), id: \.element) { index, url in
+            BatchListRowView(
+              url: url,
+              times: getClipTimes(for: url, count: appState.numberOfClips),
+              staticThumbnails: [:],  // Will be loaded by the component
+              isMuted: appState.isMuted,
+              playbackType: appState.playbackType,
+              speedOption: appState.speedOption,
+              isSelected: Binding(
+                get: { appState.selectedURLs.contains(url) },
+                set: { _ in appState.toggleSelection(for: url) }
+              ),
+              fileInfo: appState.fileManager.fileInfo[url],
+              isRowHovered: appState.hoveredBatchRow == url,
+              onHoverChanged: { hovering in
+                appState.hoveredBatchRow = hovering ? url : nil
+              }
+            )
+
+            if index < appState.filteredVideoURLs.count - 1 {
+              Divider()
+                .padding(.horizontal, 16)
+            }
+          }
+        }
+        .padding(.vertical, 8)
+      }
+
+      // Bottom controls
+      if !appState.selectedURLs.isEmpty {
+        Divider()
+        batchSelectionControls
+      }
     }
   }
 
-  @ViewBuilder
-  private var folderSelectionControls: some View {
-    if !selectedURLs.isEmpty {
-      Divider()
+  private var batchSelectionControls: some View {
+    HStack {
+      Button("Select All") {
+        appState.selectAll()
+      }
 
-      // Selection controls
-      HStack {
-        Button("Deselect All") {
-          selectedURLs.removeAll()
-          selectionOrder.removeAll()
-        }
+      Button("Deselect All") {
+        appState.deselectAll()
+      }
 
-        Spacer()
+      Spacer()
 
-        Text("\(selectedURLs.count) selected")
-          .font(.caption)
+      Text("\(appState.selectedURLs.count) selected")
+        .font(.caption)
 
-        Spacer()
+      Spacer()
 
-        Button("Delete Selected") {
-          deleteSelectedVideos()
-        }
+      Button("Delete Selected") {
+        appState.deleteSelectedVideos()
+      }
 
-        Button("Preview Selected") {
-          let urlsArray = selectionOrder.filter { selectedURLs.contains($0) }
-          if !urlsArray.isEmpty {
-            QuickLookPreviewCoordinator.shared.preview(urls: urlsArray)
-          }
+      Button("Preview Selected") {
+        let urlsArray = appState.selectionOrder.filter { appState.selectedURLs.contains($0) }
+        if !urlsArray.isEmpty {
+          QuickLookPreviewCoordinator.shared.preview(urls: urlsArray)
         }
       }
-      .padding()
     }
+    .padding()
+  }
+
+  // MARK: - Single Video View
+
+  private var singleVideoView: some View {
+    VStack(spacing: 0) {
+      // Main settings bar
+      SettingsBar(
+        folderURL: appState.folderURL,
+        playbackType: appState.playbackType,
+        tempNumberOfClips: appState.numberOfClips,
+        tempClipLength: appState.clipLength,
+        speedOption: appState.speedOption,
+        deleteHotkey: appState.deleteHotkey,
+        keepHotkey: appState.keepHotkey,
+        isMuted: appState.isMuted,
+        totalFilesText: appState.totalFilesText,
+        totalSizeText: appState.totalSizeText,
+        isTextFieldDisabled: false,
+        hotkeyFieldFocused: $hotkeyFieldFocused,
+        playbackMode: appState.playbackMode,
+        onSelectFolder: selectFolder,
+        onPlaybackTypeChange: { appState.playbackType = $0 },
+        onNumberOfClipsChange: { appState.numberOfClips = $0 },
+        onClipLengthChange: { appState.clipLength = $0 },
+        onSpeedOptionChange: { appState.speedOption = $0 },
+        onDeleteHotkeyChange: { appState.deleteHotkey = $0 },
+        onKeepHotkeyChange: { appState.keepHotkey = $0 },
+        onMuteToggle: { appState.isMuted.toggle() },
+        onGoAction: {
+          Task {
+            if let folder = appState.folderURL {
+              await appState.loadVideosAndThumbnails(from: folder)
+            }
+          }
+        },
+        onPlaybackModeChange: { appState.playbackMode = $0 }
+      )
+
+      Divider()
+
+      // Video player section
+      VStack {
+        if appState.currentIndex < appState.videoURLs.count {
+          let url = appState.videoURLs[appState.currentIndex]
+
+          if appState.playbackType == .speed {
+            SpeedPlayer(
+              url: url,
+              speedOption: $appState.speedOption,
+              isMuted: $appState.isMuted
+            )
+          } else {
+            ClipLoopingPlayer(
+              url: url,
+              numberOfClips: appState.numberOfClips,
+              clipLength: appState.clipLength,
+              isMuted: $appState.isMuted
+            )
+          }
+
+          HStack {
+            Button("Delete") {
+              appState.deleteCurrentVideo()
+            }
+            .keyboardShortcut(KeyEquivalent(Character(appState.deleteHotkey)), modifiers: [])
+
+            Spacer()
+
+            Text("\(appState.currentIndex + 1) of \(appState.videoURLs.count)")
+              .font(.caption)
+
+            Spacer()
+
+            Button("Keep") {
+              appState.skipCurrentVideo()
+            }
+            .keyboardShortcut(KeyEquivalent(Character(appState.keepHotkey)), modifiers: [])
+          }
+          .padding()
+        }
+      }
+      .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+  }
+
+  // MARK: - Side by Side View
+
+  private var sideBySideView: some View {
+    VStack(spacing: 0) {
+      // Main settings bar
+      SettingsBar(
+        folderURL: appState.folderURL,
+        playbackType: appState.playbackType,
+        tempNumberOfClips: appState.numberOfClips,
+        tempClipLength: appState.clipLength,
+        speedOption: appState.speedOption,
+        deleteHotkey: appState.deleteHotkey,
+        keepHotkey: appState.keepHotkey,
+        isMuted: appState.isMuted,
+        totalFilesText: appState.totalFilesText,
+        totalSizeText: appState.totalSizeText,
+        isTextFieldDisabled: false,
+        hotkeyFieldFocused: $hotkeyFieldFocused,
+        playbackMode: appState.playbackMode,
+        onSelectFolder: selectFolder,
+        onPlaybackTypeChange: { appState.playbackType = $0 },
+        onNumberOfClipsChange: { appState.numberOfClips = $0 },
+        onClipLengthChange: { appState.clipLength = $0 },
+        onSpeedOptionChange: { appState.speedOption = $0 },
+        onDeleteHotkeyChange: { appState.deleteHotkey = $0 },
+        onKeepHotkeyChange: { appState.keepHotkey = $0 },
+        onMuteToggle: { appState.isMuted.toggle() },
+        onGoAction: {
+          Task {
+            if let folder = appState.folderURL {
+              await appState.loadVideosAndThumbnails(from: folder)
+            }
+          }
+        },
+        onPlaybackModeChange: { appState.playbackMode = $0 }
+      )
+
+      Divider()
+
+      // Video players section
+      VStack(spacing: 16) {
+        HStack(spacing: 16) {
+          // Left video
+          if appState.currentIndex < appState.videoURLs.count {
+            videoPlayerCard(url: appState.videoURLs[appState.currentIndex], title: "Left")
+          }
+
+          // Right video
+          if appState.currentIndex + 1 < appState.videoURLs.count {
+            videoPlayerCard(url: appState.videoURLs[appState.currentIndex + 1], title: "Right")
+          }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+        // Controls
+        HStack {
+          Button("Delete Left") {
+            appState.deleteCurrentVideo()
+          }
+          .keyboardShortcut(KeyEquivalent(Character(appState.deleteHotkey)), modifiers: [])
+
+          Button("Delete Right") {
+            if appState.currentIndex + 1 < appState.videoURLs.count {
+              let url = appState.videoURLs[appState.currentIndex + 1]
+              appState.filesPendingDeletion = [url]
+              appState.alertType = .fileDelete
+              appState.showAlert = true
+            }
+          }
+          .disabled(appState.currentIndex + 1 >= appState.videoURLs.count)
+
+          Spacer()
+
+          Text(
+            "\(appState.currentIndex + 1)-\(min(appState.currentIndex + 2, appState.videoURLs.count)) of \(appState.videoURLs.count)"
+          )
+          .font(.caption)
+
+          Spacer()
+
+          Button("Keep Both") {
+            appState.skipCurrentVideo()
+            if appState.currentIndex < appState.videoURLs.count {
+              appState.skipCurrentVideo()
+            }
+          }
+          .keyboardShortcut(KeyEquivalent(Character(appState.keepHotkey)), modifiers: [])
+        }
+        .padding()
+      }
+      .padding(.top, 16)
+    }
+  }
+
+  private func videoPlayerCard(url: URL, title: String) -> some View {
+    VStack {
+      if appState.playbackType == .speed {
+        SpeedPlayer(
+          url: url,
+          speedOption: $appState.speedOption,
+          isMuted: $appState.isMuted
+        )
+      } else {
+        ClipLoopingPlayer(
+          url: url,
+          numberOfClips: appState.numberOfClips,
+          clipLength: appState.clipLength,
+          isMuted: $appState.isMuted
+        )
+      }
+
+      Text(url.lastPathComponent)
+        .font(.caption)
+        .lineLimit(1)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .aspectRatio(16 / 9, contentMode: .fit)
   }
 
   // MARK: - Actions
+
   private func selectFolder() {
     let panel = NSOpenPanel()
     panel.canChooseDirectories = true
@@ -572,252 +597,19 @@ struct ContentView: View {
     panel.allowsMultipleSelection = false
 
     if panel.runModal() == .OK, let url = panel.url {
-      folderURL = url
       Task {
-        await loadVideosAndThumbnails(from: url)
+        await appState.loadVideosAndThumbnails(from: url)
       }
     }
   }
 
-  private func loadVideosAndThumbnails(from folderURL: URL) async {
-    // Load videos
-    await loadVideos(from: folderURL)
-
-    // Reset state
-    await MainActor.run {
-      currentIndex = 0
-      selectedURLs.removeAll()
-      selectionOrder.removeAll()
-      batchSelection = Array(repeating: false, count: videoURLs.count)
-
-      // Update totals
-      updateTotalInfo()
-    }
-
-    // Load thumbnails in background
-    await loadThumbnails()
-  }
-
-  private func loadVideos(from folderURL: URL) async {
-    do {
-      let fileManager = FileManager.default
-      let contents = try fileManager.contentsOfDirectory(
-        at: folderURL, includingPropertiesForKeys: [.fileSizeKey, .contentModificationDateKey])
-
-      let videos = contents.filter { fileManager.isVideoFile($0) }
-
-      // Sort videos
-      let sortedVideos = try await withTimeout(10) {
-        return videos.sorted { url1, url2 in
-          switch sortOption {
-          case .name:
-            return sortAscending
-              ? url1.lastPathComponent < url2.lastPathComponent
-              : url1.lastPathComponent > url2.lastPathComponent
-          case .dateModified:
-            let date1 =
-              (try? url1.resourceValues(forKeys: [.contentModificationDateKey]))?
-              .contentModificationDate ?? Date.distantPast
-            let date2 =
-              (try? url2.resourceValues(forKeys: [.contentModificationDateKey]))?
-              .contentModificationDate ?? Date.distantPast
-            return sortAscending ? date1 < date2 : date1 > date2
-          case .size:
-            let size1 = (try? url1.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            let size2 = (try? url2.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            return sortAscending ? size1 < size2 : size1 > size2
-          case .duration:
-            // For duration sorting, we'd need to load file info first
-            return sortAscending
-              ? url1.lastPathComponent < url2.lastPathComponent
-              : url1.lastPathComponent > url2.lastPathComponent
-          case .dateAdded:
-            // For date added sorting, use name as fallback
-            return sortAscending
-              ? url1.lastPathComponent < url2.lastPathComponent
-              : url1.lastPathComponent > url2.lastPathComponent
-          }
-        }
-      }
-
-      await MainActor.run {
-        videoURLs = sortedVideos
-      }
-    } catch {
-      print("Error loading videos: \(error)")
-    }
-  }
-
-  private func loadThumbnails() async {
-    await MainActor.run {
-      isLoadingThumbnails = true
-      thumbnailsToLoad = videoURLs.count
-      thumbnailsLoaded = 0
-    }
-
-    for (index, url) in videoURLs.enumerated() {
-      // Load file info
-      await loadFileInfo(for: url)
-
-      await MainActor.run {
-        thumbnailsLoaded = index + 1
-      }
-    }
-
-    await MainActor.run {
-      isLoadingThumbnails = false
-      updateTotalInfo()
-    }
-  }
-
-  private func loadFileInfo(for url: URL) async {
-    do {
-      let asset = AVURLAsset(url: url)
-
-      // Load basic properties
-      let duration = try await asset.load(.duration)
-      let tracks = try await asset.load(.tracks)
-
-      // Get file size
-      let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
-      let fileSize = attributes[.size] as? UInt64 ?? 0
-
-      // Get video track info
-      let videoTrack = tracks.first { $0.mediaType == .video }
-      var resolution = "Unknown"
-      var fps = "Unknown"
-
-      if let track = videoTrack {
-        let naturalSize = try await track.load(.naturalSize)
-        let transform = try await track.load(.preferredTransform)
-        let nominalFrameRate = try await track.load(.nominalFrameRate)
-
-        // Apply transform to get actual displayed size
-        let transformedSize = naturalSize.applying(transform)
-        let width = Int(abs(transformedSize.width))
-        let height = Int(abs(transformedSize.height))
-
-        resolution = "\(width)x\(height)"
-        fps = String(format: "%.1f", nominalFrameRate)
-      }
-
-      let info = FileInfo(
-        size: formatFileSize(bytes: fileSize),
-        duration: formatDuration(duration.seconds),
-        resolution: resolution,
-        fps: fps
-      )
-
-      await MainActor.run {
-        fileInfo[url] = info
-      }
-    } catch {
-      let info = FileInfo(
-        size: "Unknown",
-        duration: "Unknown",
-        resolution: "Unknown",
-        fps: "Unknown"
-      )
-
-      await MainActor.run {
-        fileInfo[url] = info
-      }
-    }
-  }
-
-  private func updateTotalInfo() {
-    let totalFiles = videoURLs.count
-    let totalSize = videoURLs.compactMap { url in
-      try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? UInt64
-    }.reduce(0, +)
-
-    totalFilesText = "\(totalFiles) files"
-    totalSizeText = formatFileSize(bytes: totalSize)
-  }
-
-  private func setupHotkeyMonitoring() {
-    hotkeyMonitor.onSpace = {
-      if !hotkeyFieldFocused {
-        handleGlobalSpacebar()
-      }
-    }
-    hotkeyMonitor.onDelete = {
-      if !hotkeyFieldFocused && (playbackMode == .single || playbackMode == .sideBySide) {
-        deleteCurrentVideo()
-      }
-    }
-    hotkeyMonitor.onKeep = {
-      if !hotkeyFieldFocused && (playbackMode == .single || playbackMode == .sideBySide) {
-        skipCurrentVideo()
-      }
-    }
-    hotkeyMonitor.deleteKey = deleteHotkey
-    hotkeyMonitor.keepKey = keepHotkey
-    hotkeyMonitor.startMonitoring()
-  }
-
-  private func handleGlobalSpacebar() {
-    // Toggle playback or handle spacebar action
-    print("Global spacebar pressed")
-  }
-
-  private func deleteCurrentVideo() {
-    guard currentIndex < videoURLs.count else { return }
-    let url = videoURLs[currentIndex]
-    filesPendingDeletion = [url]
-    alertType = .fileDelete
-    showAlert = true
-  }
-
-  private func deleteVideo(at index: Int) {
-    guard index < videoURLs.count else { return }
-    let url = videoURLs[index]
-    filesPendingDeletion = [url]
-    alertType = .fileDelete
-    showAlert = true
-  }
-
-  private func deleteSelectedVideos() {
-    let selectedArray = Array(selectedURLs)
-    filesPendingDeletion = selectedArray
-    alertType = .fileDelete
-    showAlert = true
-  }
-
-  private func skipCurrentVideo() {
-    guard currentIndex < videoURLs.count else { return }
-    currentIndex = min(currentIndex + 1, videoURLs.count - 1)
-  }
-
-  private func toggleSelection(for url: URL) {
-    if selectedURLs.contains(url) {
-      selectedURLs.remove(url)
-      selectionOrder.removeAll { $0 == url }
-    } else {
-      selectedURLs.insert(url)
-      selectionOrder.append(url)
-    }
-    syncBatchSelectionFromSelectedURLs()
-  }
-
-  private func syncBatchSelectionFromSelectedURLs() {
-    batchSelection = videoURLs.map { selectedURLs.contains($0) }
-  }
-
-  private func initializeForCurrentMode() async {
-    // Initialize any mode-specific setup
-    await MainActor.run {
-      currentIndex = 0
-    }
-  }
-
-  private func createAlertForType() -> Alert {
-    switch alertType {
+  private func createAlert() -> Alert {
+    switch appState.alertType {
     case .fileDelete:
       return Alert(
         title: Text("Confirm Deletion"),
         message: Text(
-          "Are you sure you want to delete \(filesPendingDeletion.count) file(s)? This action cannot be undone."
+          "Are you sure you want to delete \(appState.filesPendingDeletion.count) file(s)? This action cannot be undone."
         ),
         primaryButton: .destructive(Text("Delete")) {
           Task {
@@ -825,11 +617,11 @@ struct ContentView: View {
           }
         },
         secondaryButton: .cancel {
-          filesPendingDeletion.removeAll()
+          appState.filesPendingDeletion.removeAll()
         }
       )
     case .folderDelete:
-      let info = folderDeletionInfo ?? (fileCount: 0, size: "", name: "")
+      let info = appState.folderDeletionInfo ?? (fileCount: 0, size: "", name: "")
       return Alert(
         title: Text("Delete Folder"),
         message: Text("Delete '\(info.name)' containing \(info.fileCount) files (\(info.size))?"),
@@ -839,105 +631,46 @@ struct ContentView: View {
           }
         },
         secondaryButton: .cancel {
-          folderPendingDeletion = nil
-          folderDeletionInfo = nil
+          appState.folderPendingDeletion = nil
+          appState.folderDeletionInfo = nil
         }
       )
     }
   }
 
   private func performFileDeletion() async {
-    for url in filesPendingDeletion {
+    for url in appState.filesPendingDeletion {
       do {
         try FileManager.default.trashItem(at: url, resultingItemURL: nil)
         await MainActor.run {
-          videoURLs.removeAll { $0 == url }
-          selectedURLs.remove(url)
-          selectionOrder.removeAll { $0 == url }
-          fileInfo.removeValue(forKey: url)
+          appState.videoURLs.removeAll { $0 == url }
+          appState.selectedURLs.remove(url)
+          appState.selectionOrder.removeAll { $0 == url }
+          appState.fileManager.fileInfo.removeValue(forKey: url)
         }
       } catch {
         print("Error deleting file: \(error)")
       }
     }
-
-    await MainActor.run {
-      filesPendingDeletion.removeAll()
-      batchSelection = Array(repeating: false, count: videoURLs.count)
-      if currentIndex >= videoURLs.count && !videoURLs.isEmpty {
-        currentIndex = videoURLs.count - 1
-      }
-      updateTotalInfo()
-    }
-  }
-
-  private func prepareFolderDeletion() async {
-    guard let folder = folderURL else { return }
-
-    do {
-      let contents = try FileManager.default.contentsOfDirectory(
-        at: folder, includingPropertiesForKeys: [.fileSizeKey])
-      let totalSize = contents.compactMap { url in
-        try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize
-      }.reduce(0, +)
-
-      await MainActor.run {
-        folderPendingDeletion = folder
-        folderDeletionInfo = (
-          fileCount: contents.count,
-          size: formatFileSize(bytes: UInt64(totalSize)),
-          name: folder.lastPathComponent
-        )
-        alertType = .folderDelete
-        showAlert = true
-      }
-    } catch {
-      print("Error preparing folder deletion: \(error)")
-    }
+    appState.filesPendingDeletion.removeAll()
   }
 
   private func performFolderDeletion() async {
-    guard let folder = folderPendingDeletion else { return }
+    guard let folderURL = appState.folderPendingDeletion else { return }
 
     do {
-      try FileManager.default.trashItem(at: folder, resultingItemURL: nil)
-
+      try FileManager.default.trashItem(at: folderURL, resultingItemURL: nil)
       await MainActor.run {
-        folderPendingDeletion = nil
-        folderDeletionInfo = nil
-
-        // Move to next folder if in collection mode
-        if isFolderCollectionMode {
-          nextFolder()
-        } else {
-          // Clear current folder
-          folderURL = nil
-          videoURLs.removeAll()
-          fileInfo.removeAll()
-          selectedURLs.removeAll()
-          selectionOrder.removeAll()
+        appState.folderCollection.removeAll { $0 == folderURL }
+        if appState.currentFolderIndex >= appState.folderCollection.count {
+          appState.currentFolderIndex = max(0, appState.folderCollection.count - 1)
         }
       }
     } catch {
       print("Error deleting folder: \(error)")
     }
-  }
 
-  private func previousFolder() {
-    guard isFolderCollectionMode && currentFolderIndex > 0 else { return }
-    currentFolderIndex -= 1
-    folderURL = folderCollection[currentFolderIndex]
-    Task {
-      await loadVideosAndThumbnails(from: folderURL!)
-    }
-  }
-
-  private func nextFolder() {
-    guard isFolderCollectionMode && currentFolderIndex < folderCollection.count - 1 else { return }
-    currentFolderIndex += 1
-    folderURL = folderCollection[currentFolderIndex]
-    Task {
-      await loadVideosAndThumbnails(from: folderURL!)
-    }
+    appState.folderPendingDeletion = nil
+    appState.folderDeletionInfo = nil
   }
 }

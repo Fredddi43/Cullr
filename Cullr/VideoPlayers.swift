@@ -106,9 +106,10 @@ struct VideoPlayerWithControls: View {
             }
           )
           .accentColor(.white)
-          .onChange(of: sliderValue) { newValue in
-            if isDragging {
-              seek(to: newValue)
+          .onChange(of: sliderValue) { oldValue, newValue in
+            if abs(newValue - currentTime) > 0.5 {
+              let targetTime = CMTime(seconds: newValue, preferredTimescale: 600)
+              player.seek(to: targetTime)
             }
           }
 
@@ -251,9 +252,7 @@ struct VideoPlayerWithControls: View {
       }
     }
 
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-      updatePlayingState()
-    }
+    updatePlayingState()
   }
 
   private func toggleMute() {
@@ -330,10 +329,9 @@ struct ClipLoopingPlayer: View {
     Task {
       do {
         let loadedDuration = try await asset.load(.duration)
-        let d = loadedDuration.seconds
         await MainActor.run {
-          let times = computeClipStartTimes(duration: d, count: numberOfClips)
-          duration = d
+          let times = computeClipStartTimes(duration: loadedDuration.seconds, count: numberOfClips)
+          duration = loadedDuration.seconds
           startTimes = times
           let item = AVPlayerItem(asset: asset)
           let newPlayer = AVPlayer(playerItem: item)
@@ -343,7 +341,7 @@ struct ClipLoopingPlayer: View {
         }
       } catch {
         await MainActor.run {
-          errorMessage = "Failed to load video duration"
+          errorMessage = "Failed to load video"
           showFallback = true
         }
       }
@@ -474,7 +472,7 @@ struct SpeedPlayer: View {
     .onDisappear {
       cleanup()
     }
-    .onChange(of: speedOption) { _ in
+    .onChange(of: speedOption) { oldValue, newValue in
       updatePlaybackSpeed()
     }
   }
@@ -486,9 +484,8 @@ struct SpeedPlayer: View {
     Task {
       do {
         let loadedDuration = try await asset.load(.duration)
-        let d = loadedDuration.seconds
         await MainActor.run {
-          duration = d
+          duration = loadedDuration.seconds
           let item = AVPlayerItem(asset: asset)
           let newPlayer = AVPlayer(playerItem: item)
           newPlayer.isMuted = isMuted
@@ -497,7 +494,7 @@ struct SpeedPlayer: View {
         }
       } catch {
         await MainActor.run {
-          errorMessage = "Failed to load video duration"
+          errorMessage = "Failed to load video"
           showFallback = true
         }
       }

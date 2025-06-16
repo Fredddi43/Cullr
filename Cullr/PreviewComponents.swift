@@ -2,671 +2,469 @@ import AVFoundation
 import CoreImage
 import SwiftUI
 
-// MARK: - Thumbnail Cache
+// MARK: - Video Thumbnail with Caching and Preview
 
-/// Global thumbnail cache for performance optimization
+/// High-performance thumbnail cache with memory management
+@MainActor
 class ThumbnailCache: ObservableObject {
   static let shared = ThumbnailCache()
-  private var cache: [URL: Image] = [:]
+  private var cache: [String: Image] = [:]
+  private let maxCacheSize = 500  // Limit cache size for memory efficiency
+  private var accessOrder: [String] = []  // LRU tracking
 
-  init() {}
+  private init() {}
 
-  func get(_ url: URL) -> Image? {
-    return cache[url]
+  func get(for key: String) -> Image? {
+    if let image = cache[key] {
+      // Move to end for LRU
+      accessOrder.removeAll { $0 == key }
+      accessOrder.append(key)
+      return image
+    }
+    return nil
   }
 
-  func set(_ url: URL, image: Image) {
-    cache[url] = image
+  func set(_ image: Image, for key: String) {
+    // Remove if already exists
+    if cache[key] != nil {
+      accessOrder.removeAll { $0 == key }
+    }
+
+    // Add new entry
+    cache[key] = image
+    accessOrder.append(key)
+
+    // Enforce cache size limit
+    while cache.count > maxCacheSize {
+      if let oldestKey = accessOrder.first {
+        cache.removeValue(forKey: oldestKey)
+        accessOrder.removeFirst()
+      }
+    }
   }
+
+  func clear() {
+    cache.removeAll()
+    accessOrder.removeAll()
+  }
+
+  var cacheSize: Int { cache.count }
 }
 
-// MARK: - Video Thumbnail Components
-
-/// Basic video thumbnail view with caching
+/// Video thumbnail view with hover preview functionality
 struct VideoThumbnailView: View {
   let url: URL
-  @State private var thumbnail: Image?
-  @State private var isLoading = true
-
-  var body: some View {
-    ZStack {
-      if let thumbnail = thumbnail {
-        thumbnail
-          .resizable()
-          .aspectRatio(contentMode: .fill)
-      } else if isLoading {
-        ProgressView()
-          .progressViewStyle(CircularProgressViewStyle())
-      } else {
-        Color.black
-      }
-    }
-    .task {
-      await loadThumbnail()
-    }
-  }
-
-  private func loadThumbnail() async {
-    if let cached = ThumbnailCache.shared.get(url) {
-      thumbnail = cached
-      isLoading = false
-      return
-    }
-
-    do {
-      let asset = AVURLAsset(url: url)
-      let duration = asset.duration.seconds
-      let time = max(duration * 0.02, 0.1)
-      let generator = AVAssetImageGenerator(asset: asset)
-      generator.appliesPreferredTrackTransform = true
-      generator.maximumSize = CGSize(width: 600, height: 338)
-      generator.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
-      generator.requestedTimeToleranceAfter = CMTime(seconds: 0.1, preferredTimescale: 600)
-      let cmTime = CMTime(seconds: time, preferredTimescale: 600)
-      let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
-      let image = Image(decorative: cgImage, scale: 1.0)
-
-      await MainActor.run {
-        ThumbnailCache.shared.set(url, image: image)
-        thumbnail = image
-        isLoading = false
-      }
-    } catch {
-      await MainActor.run {
-        isLoading = false
-      }
-    }
-  }
-}
-
-// MARK: - Interactive Preview Components
-
-/// Preview card that plays video on hover
-struct HoverPreviewCard: View {
-  let url: URL
-  let thumbnail: Image?
+  let clipTimes: [Double]
+  let staticThumbnails: [String: Image]
   let isMuted: Bool
-  var startTime: Double = 0
-  var forcePlay: Bool = false
-  var playbackType: PlaybackType
-  var speedOption: SpeedOption
-
-  @State private var player: AVPlayer?
-  @State private var asset: AVURLAsset?
-  @State private var duration: Double = 0
-  @State private var playbackEndObserver: NSObjectProtocol?
-  @State private var isAssetReady: Bool = false
-
-  var body: some View {
-    ZStack {
-      if let thumbnail = thumbnail {
-        thumbnail
-          .resizable()
-          .aspectRatio(contentMode: .fill)
-      } else {
-        Color.black
-      }
-
-      if forcePlay && playbackType == .speed, let player = player {
-        BaseVideoPlayerView(player: player)
-          .onAppear {
-            if isAssetReady {
-              startSpeedPlayback()
-            }
-          }
-          .onDisappear {
-            stopPlayback()
-          }
-      } else if forcePlay && playbackType == .clips, let player = player {
-        BaseVideoPlayerView(player: player)
-          .onAppear {
-            player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-            player.play()
-          }
-          .onDisappear {
-            stopPlayback()
-          }
-      }
-    }
-    .clipped()
-    .onAppear {
-      if asset == nil {
-        preCreateAsset()
-      }
-    }
-    .onChange(of: speedOption) { _ in
-      if forcePlay && playbackType == .speed && isAssetReady {
-        updateSpeedPlayback()
-      }
-    }
-    .onChange(of: forcePlay) { newForcePlay in
-      if newForcePlay && playbackType == .speed {
-        if isAssetReady {
-          createPlayerForSpeed()
-        }
-      } else if newForcePlay && playbackType == .clips {
-        createPlayerForClips()
-      } else if !newForcePlay {
-        stopPlayback()
-      }
-    }
-  }
-
-  // MARK: - Private Methods
-
-  private func preCreateAsset() {
-    asset = AVURLAsset(url: url)
-
-    if playbackType == .speed {
-      Task {
-        if let asset = asset {
-          let loadedDuration = try? await asset.load(.duration)
-          await MainActor.run {
-            self.duration = loadedDuration?.seconds ?? 0
-            self.isAssetReady = true
-          }
-        }
-      }
-    } else {
-      isAssetReady = true
-    }
-  }
-
-  private func createPlayerForClips() {
-    guard let asset = asset else {
-      preCreateAsset()
-      return
-    }
-    let item = AVPlayerItem(asset: asset)
-    let newPlayer = AVPlayer(playerItem: item)
-    newPlayer.isMuted = isMuted
-    player = newPlayer
-  }
-
-  private func createPlayerForSpeed() {
-    guard let asset = asset, isAssetReady else { return }
-    let playerItem = AVPlayerItem(asset: asset)
-    let newPlayer = AVPlayer(playerItem: playerItem)
-    newPlayer.isMuted = isMuted
-    player = newPlayer
-    startSpeedPlayback()
-  }
-
-  private func startSpeedPlayback() {
-    guard let player = player, duration > 0 else { return }
-
-    let startTime = duration * 0.02
-    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
-      player.rate = Float(self.speedOption.rawValue)
-      player.play()
-    }
-
-    playbackEndObserver = NotificationCenter.default.addObserver(
-      forName: .AVPlayerItemDidPlayToEndTime,
-      object: player.currentItem,
-      queue: .main
-    ) { _ in
-      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
-        player.rate = Float(self.speedOption.rawValue)
-        player.play()
-      }
-    }
-  }
-
-  private func updateSpeedPlayback() {
-    guard let player = player else { return }
-    player.rate = Float(speedOption.rawValue)
-  }
-
-  private func stopPlayback() {
-    player?.pause()
-    player?.rate = 0
-
-    if let observer = playbackEndObserver {
-      NotificationCenter.default.removeObserver(observer)
-      playbackEndObserver = nil
-    }
-
-    player = nil
-  }
-}
-
-// MARK: - Specialized Preview Components
-
-/// Folder view hover loop preview
-struct FolderHoverLoopPreview: View {
-  let url: URL
-  let isMuted: Bool
-  let numberOfClips: Int
-  let clipLength: Int
   let playbackType: PlaybackType
   let speedOption: SpeedOption
-
-  @State private var isHovered = false
-  @State private var player: AVPlayer?
-  @State private var asset: AVURLAsset?
-  @State private var currentClip: Int = 0
-  @State private var timer: Timer?
-  @State private var startTimes: [Double] = []
-  @State private var duration: Double = 0
-  @State private var fadeOpacity: Double = 0.0
   @State private var thumbnail: Image?
-  @State private var playbackEndObserver: NSObjectProtocol?
-  @State private var isAssetReady: Bool = false
+  @State private var isHovering = false
+  @State private var hoverStartTime: Date?
 
   var body: some View {
     ZStack {
-      if let thumbnail = thumbnail {
-        thumbnail
+      // Static thumbnail
+      if let staticThumb = staticThumbnails[thumbnailKey(url: url, time: 1.0)] {
+        staticThumb
+          .resizable()
+          .aspectRatio(contentMode: .fill)
+      } else if let thumb = thumbnail {
+        thumb
           .resizable()
           .aspectRatio(contentMode: .fill)
       } else {
-        Color.black
+        Rectangle()
+          .fill(Color.gray.opacity(0.3))
       }
 
-      if isHovered, let player = player {
-        BaseVideoPlayerView(player: player)
-          .opacity(fadeOpacity)
-          .onAppear {
-            withAnimation(.easeIn(duration: 0.2)) {
-              fadeOpacity = 1.0
-            }
-            if playbackType == .clips {
-              startLoopingClips()
-            } else {
-              startSpeedPlayback()
-            }
-          }
-          .onDisappear {
-            withAnimation(.easeOut(duration: 0.2)) {
-              fadeOpacity = 0.0
-            }
-            stopPlayback()
-          }
+      // Hover preview overlay
+      if isHovering {
+        HoverPreviewCard(
+          url: url,
+          times: clipTimes,
+          isMuted: isMuted,
+          playbackType: playbackType,
+          speedOption: speedOption,
+          forcePlay: shouldShowPreview
+        )
+        .opacity(shouldShowPreview ? 1.0 : 0.0)
+        .animation(.easeInOut(duration: 0.3), value: shouldShowPreview)
       }
     }
     .onHover { hovering in
-      isHovered = hovering
+      isHovering = hovering
       if hovering {
-        if player == nil && isAssetReady {
-          createPlayer()
+        hoverStartTime = Date()
+      } else {
+        hoverStartTime = nil
+      }
+    }
+    .onAppear {
+      loadThumbnail()
+    }
+  }
+
+  private var shouldShowPreview: Bool {
+    guard let startTime = hoverStartTime else { return false }
+    return Date().timeIntervalSince(startTime) > 0.8  // 800ms delay
+  }
+
+  private func loadThumbnail() {
+    let key = thumbnailKey(url: url, time: 1.0)
+
+    if let cached = ThumbnailCache.shared.get(for: key) {
+      thumbnail = cached
+      return
+    }
+
+    Task {
+      if let generated = await generateStaticThumbnail(for: url) {
+        await MainActor.run {
+          thumbnail = generated
+          ThumbnailCache.shared.set(generated, for: key)
         }
+      }
+    }
+  }
+}
+
+// MARK: - Hover Preview Card
+
+struct HoverPreviewCard: View {
+  let url: URL
+  let times: [Double]
+  let isMuted: Bool
+  let playbackType: PlaybackType
+  let speedOption: SpeedOption
+  let forcePlay: Bool
+
+  @State private var player: AVPlayer?
+  @State private var isAssetReady = false
+  @State private var currentClip = 0
+  @State private var timer: Timer?
+  @State private var playbackObserver: NSObjectProtocol?
+  @State private var duration: Double = 0
+  @State private var startTimes: [Double] = []
+
+  private let startTime: Double = 0.02
+
+  init(
+    url: URL, times: [Double], isMuted: Bool, playbackType: PlaybackType, speedOption: SpeedOption,
+    forcePlay: Bool
+  ) {
+    self.url = url
+    self.times = times
+    self.isMuted = isMuted
+    self.forcePlay = forcePlay
+    self.playbackType = playbackType
+    self.speedOption = speedOption
+  }
+
+  var body: some View {
+    ZStack {
+      Rectangle()
+        .fill(Color.gray.opacity(0.3))
+
+      if forcePlay && isAssetReady, let player = player {
+        BaseVideoPlayerView(player: player)
+          .allowsHitTesting(false)
+      }
+    }
+    .onAppear {
+      setupPlayer()
+    }
+    .onDisappear {
+      cleanup()
+    }
+    .onChange(of: forcePlay) { _, shouldPlay in
+      if shouldPlay {
+        startPlayback()
       } else {
         stopPlayback()
       }
     }
-    .onAppear {
-      if asset == nil {
-        preCreateAsset()
-      }
+    .onChange(of: speedOption) { _, newValue in
+      player?.rate = Float(newValue.rawValue)
     }
-    .task {
-      await loadThumbnail()
-    }
-    .clipped()
   }
 
-  // MARK: - Private Methods
+  private func setupPlayer() {
+    let asset = AVURLAsset(url: url)
+    let playerItem = AVPlayerItem(asset: asset)
+    player = AVPlayer(playerItem: playerItem)
+    player?.isMuted = isMuted
 
-  private func loadThumbnail() async {
-    if let cached = ThumbnailCache.shared.get(url) {
-      thumbnail = cached
-    } else {
+    // Wait for asset to be ready
+    Task {
       do {
-        let asset = AVURLAsset(url: url)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 1200, height: 675)
-        generator.requestedTimeToleranceBefore = .zero
-        generator.requestedTimeToleranceAfter = .zero
-        let cmTime = CMTime(seconds: asset.duration.seconds * 0.02, preferredTimescale: 600)
-        let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
-        let image = Image(decorative: cgImage, scale: 1.0)
-        ThumbnailCache.shared.set(url, image: image)
-        thumbnail = image
+        let loadedDuration = try await asset.load(.duration)
+        await MainActor.run {
+          duration = loadedDuration.seconds
+          startTimes =
+            playbackType == .clips
+            ? computeClipStartTimes(duration: duration, count: 5) : [startTime]
+          isAssetReady = true
+          if forcePlay {
+            startPlayback()
+          }
+        }
       } catch {
         // Handle error silently
       }
     }
   }
 
-  private func preCreateAsset() {
-    asset = AVURLAsset(url: url)
+  private func startPlayback() {
+    guard let player = player else { return }
 
-    Task {
-      if let asset = asset {
-        let loadedDuration = try? await asset.load(.duration)
-        await MainActor.run {
-          self.duration = loadedDuration?.seconds ?? 0
-          if playbackType == .clips && duration > 0 {
-            startTimes = computeClipStartTimes(duration: duration, count: numberOfClips)
-          }
-          self.isAssetReady = true
-
-          if isHovered && player == nil {
-            createPlayer()
-          }
-        }
-      }
-    }
-  }
-
-  private func createPlayer() {
-    guard let asset = asset, isAssetReady else { return }
-
-    let playerItem = AVPlayerItem(asset: asset)
-    player = AVPlayer(playerItem: playerItem)
-    player?.isMuted = isMuted
-
-    if playbackType == .clips {
-      startLoopingClips()
+    if playbackType == .clips && !startTimes.isEmpty {
+      playCurrentClip()
     } else {
-      startSpeedPlayback()
-    }
-  }
-
-  private func startSpeedPlayback() {
-    guard let player = player else { return }
-
-    player.rate = Float(speedOption.rawValue)
-    player.seek(to: CMTime(seconds: duration * 0.02, preferredTimescale: 600))
-    player.play()
-
-    playbackEndObserver = NotificationCenter.default.addObserver(
-      forName: .AVPlayerItemDidPlayToEndTime,
-      object: player.currentItem,
-      queue: .main
-    ) { _ in
-      player.seek(to: CMTime(seconds: self.duration * 0.02, preferredTimescale: 600))
       player.play()
+      player.rate = Float(speedOption.rawValue)
     }
-  }
-
-  private func startLoopingClips() {
-    guard let player = player else { return }
-
-    currentClip = 0
-    playCurrentClip()
   }
 
   private func playCurrentClip() {
     guard let player = player, !startTimes.isEmpty else { return }
 
     let startTime = startTimes[currentClip]
-    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-    player.rate = 1.0
-    player.play()
+    let cmStartTime = CMTime(seconds: startTime, preferredTimescale: 600)
 
-    timer?.invalidate()
-    timer = Timer.scheduledTimer(withTimeInterval: Double(clipLength), repeats: false) { _ in
-      self.currentClip = (self.currentClip + 1) % self.startTimes.count
-      self.playCurrentClip()
+    player.seek(to: cmStartTime) { [player] _ in
+      player.play()
     }
   }
 
   private func stopPlayback() {
     player?.pause()
-    player?.rate = 0
     timer?.invalidate()
     timer = nil
 
-    if let observer = playbackEndObserver {
+    if let observer = playbackObserver {
       NotificationCenter.default.removeObserver(observer)
-      playbackEndObserver = nil
+      playbackObserver = nil
     }
+  }
+
+  private func cleanup() {
+    stopPlayback()
+    player = nil
+    isAssetReady = false
   }
 }
 
-/// Speed-focused folder preview
-struct FolderSpeedPreview: View {
+// MARK: - Folder Hover Preview
+
+struct FolderHoverLoopPreview: View {
   let url: URL
   let isMuted: Bool
-  let speedOption: SpeedOption
+  let forcePlay: Bool
 
-  @State private var isHovered = false
   @State private var player: AVPlayer?
-  @State private var asset: AVURLAsset?
+  @State private var isAssetReady = false
+  @State private var currentClip = 0
+  @State private var timer: Timer?
+  @State private var opacity: Double = 0
   @State private var duration: Double = 0
-  @State private var fadeOpacity: Double = 0.0
-  @State private var thumbnail: Image?
-  @State private var playbackEndObserver: NSObjectProtocol?
-  @State private var isAssetReady: Bool = false
+  @State private var startTimes: [Double] = []
+
+  private let clipLength: Float = 3.0
+
+  init(url: URL, isMuted: Bool, forcePlay: Bool) {
+    self.url = url
+    self.isMuted = isMuted
+    self.forcePlay = forcePlay
+  }
 
   var body: some View {
-    ZStack {
-      if let thumbnail = thumbnail {
-        thumbnail
-          .resizable()
-          .aspectRatio(contentMode: .fill)
-      } else {
-        Color.black
-      }
-
-      if isHovered, let player = player {
+    Group {
+      if let player = player {
         BaseVideoPlayerView(player: player)
-          .opacity(fadeOpacity)
-          .onAppear {
-            withAnimation(.easeIn(duration: 0.2)) { fadeOpacity = 1.0 }
-            startSpeedPlayback()
-          }
-          .onDisappear {
-            withAnimation(.easeOut(duration: 0.2)) { fadeOpacity = 0.0 }
-            stopPlayback()
-          }
-      }
-    }
-    .onHover { hovering in
-      isHovered = hovering
-      if hovering {
-        if player == nil && isAssetReady {
-          createPlayer()
-        }
+          .opacity(opacity)
       } else {
-        stopPlayback()
+        Rectangle()
+          .fill(Color.gray.opacity(0.3))
+          .opacity(opacity)
       }
     }
     .onAppear {
-      if asset == nil {
-        preCreateAsset()
-      }
+      setupPlayer()
     }
-    .onChange(of: speedOption) { _ in
-      if isHovered, let player = player {
-        updateSpeedPlayback()
-      }
+    .onDisappear {
+      cleanup()
     }
-    .task {
-      await loadThumbnail()
-    }
-    .clipped()
-  }
-
-  // MARK: - Private Methods
-
-  private func loadThumbnail() async {
-    if let cached = ThumbnailCache.shared.get(url) {
-      thumbnail = cached
-    } else {
-      do {
-        let asset = AVURLAsset(url: url)
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 600, height: 338)
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.1, preferredTimescale: 600)
-        let time = max(asset.duration.seconds * 0.02, 0.1)
-        let cmTime = CMTime(seconds: time, preferredTimescale: 600)
-        let cgImage = try generator.copyCGImage(at: cmTime, actualTime: nil)
-        let image = Image(decorative: cgImage, scale: 1.0)
-        ThumbnailCache.shared.set(url, image: image)
-        thumbnail = image
-      } catch {
-        // Handle error silently
-      }
-    }
-  }
-
-  private func preCreateAsset() {
-    asset = AVURLAsset(url: url)
-
-    Task {
-      if let asset = asset {
-        let loadedDuration = try? await asset.load(.duration)
-        await MainActor.run {
-          self.duration = loadedDuration?.seconds ?? 0
-          self.isAssetReady = true
-
-          if isHovered && player == nil {
-            createPlayer()
-          }
+    .onChange(of: forcePlay) { _, shouldPlay in
+      if shouldPlay && isAssetReady {
+        startPlayback()
+        withAnimation(.easeIn(duration: 0.3)) {
+          opacity = 1.0
         }
-      }
-    }
-  }
-
-  private func createPlayer() {
-    guard let asset = asset, isAssetReady else { return }
-
-    let playerItem = AVPlayerItem(asset: asset)
-    player = AVPlayer(playerItem: playerItem)
-    player?.isMuted = isMuted
-    startSpeedPlayback()
-  }
-
-  private func startSpeedPlayback() {
-    guard let player = player, duration > 0 else { return }
-
-    let startTime = duration * 0.02
-    player.rate = Float(speedOption.rawValue)
-    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
-      player.rate = Float(self.speedOption.rawValue)
-      player.play()
-    }
-
-    playbackEndObserver = NotificationCenter.default.addObserver(
-      forName: .AVPlayerItemDidPlayToEndTime,
-      object: player.currentItem,
-      queue: .main
-    ) { _ in
-      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
-        player.rate = Float(self.speedOption.rawValue)
-        player.play()
-      }
-    }
-  }
-
-  private func updateSpeedPlayback() {
-    guard let player = player else { return }
-    player.rate = Float(speedOption.rawValue)
-  }
-
-  private func stopPlayback() {
-    player?.pause()
-    player?.rate = 0
-
-    if let observer = playbackEndObserver {
-      NotificationCenter.default.removeObserver(observer)
-      playbackEndObserver = nil
-    }
-  }
-}
-
-// MARK: - Simple Video Clip Preview
-
-/// Simple video clip preview for side-by-side view
-struct VideoClipPreview: View {
-  let url: URL
-  let startTime: Double
-  let length: Double
-  let isMuted: Bool
-
-  @State private var player: AVPlayer?
-
-  var body: some View {
-    Group {
-      if let player = player {
-        BaseVideoPlayerView(player: player)
-          .onAppear {
-            player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600))
-            player.play()
-          }
-          .onDisappear {
-            player.pause()
-          }
       } else {
-        Color.black
-          .onAppear {
-            let asset = AVURLAsset(url: url)
-            let item = AVPlayerItem(asset: asset)
-            let newPlayer = AVPlayer(playerItem: item)
-            newPlayer.isMuted = isMuted
-            player = newPlayer
-          }
-      }
-    }
-  }
-}
-
-/// Speed clip preview for side-by-side view
-struct SpeedClipPreview: View {
-  let url: URL
-  let speedOption: SpeedOption
-  let isMuted: Bool
-
-  @State private var player: AVPlayer?
-  @State private var duration: Double = 0
-  @State private var playbackEndObserver: NSObjectProtocol?
-
-  var body: some View {
-    Group {
-      if let player = player {
-        BaseVideoPlayerView(player: player)
-          .onAppear {
-            startSpeedPlayback()
-          }
-          .onDisappear {
-            stopPlayback()
-          }
-      } else {
-        Color.black
-          .onAppear {
-            setupPlayer()
-          }
+        stopPlayback()
+        withAnimation(.easeOut(duration: 0.2)) {
+          opacity = 0.0
+        }
       }
     }
   }
 
   private func setupPlayer() {
     let asset = AVURLAsset(url: url)
-    asset.loadValuesAsynchronously(forKeys: ["duration"]) {
-      let d = asset.duration.seconds
-      DispatchQueue.main.async {
-        duration = d
-        let item = AVPlayerItem(asset: asset)
-        let newPlayer = AVPlayer(playerItem: item)
-        newPlayer.isMuted = isMuted
-        player = newPlayer
-        startSpeedPlayback()
+    let playerItem = AVPlayerItem(asset: asset)
+    player = AVPlayer(playerItem: playerItem)
+    player?.isMuted = isMuted
+
+    Task {
+      do {
+        let loadedDuration = try await asset.load(.duration)
+        await MainActor.run {
+          duration = loadedDuration.seconds
+          startTimes = computeClipStartTimes(duration: duration, count: 5)
+          isAssetReady = true
+          if forcePlay {
+            startPlayback()
+            withAnimation(.easeIn(duration: 0.3)) {
+              opacity = 1.0
+            }
+          }
+        }
+      } catch {
+        // Handle error silently
       }
     }
   }
 
-  private func startSpeedPlayback() {
-    guard let player = player else { return }
-    let startTime = duration * 0.02
+  private func startPlayback() {
+    guard let player = player, !startTimes.isEmpty else { return }
+    currentClip = 0
+    playClip()
+  }
 
-    player.rate = Float(speedOption.rawValue)
-    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
+  private func playClip() {
+    guard let player = player, !startTimes.isEmpty else { return }
+
+    let start = startTimes[currentClip]
+    player.seek(to: CMTime(seconds: start, preferredTimescale: 600)) { [player] _ in
+      player.play()
+    }
+
+    timer?.invalidate()
+    timer = Timer.scheduledTimer(withTimeInterval: Double(clipLength), repeats: false) { [self] _ in
+      currentClip = (currentClip + 1) % startTimes.count
+      playClip()
+    }
+  }
+
+  private func stopPlayback() {
+    player?.pause()
+    timer?.invalidate()
+    timer = nil
+  }
+
+  private func cleanup() {
+    stopPlayback()
+    player = nil
+    isAssetReady = false
+    opacity = 0
+  }
+}
+
+// MARK: - Folder Speed Preview
+
+struct FolderSpeedPreview: View {
+  let url: URL
+  let isMuted: Bool
+  let speedOption: SpeedOption
+  let forcePlay: Bool
+
+  @State private var player: AVPlayer?
+  @State private var isAssetReady = false
+  @State private var opacity: Double = 0
+  @State private var duration: Double = 0
+  @State private var playbackObserver: NSObjectProtocol?
+
+  init(url: URL, isMuted: Bool, speedOption: SpeedOption, forcePlay: Bool) {
+    self.url = url
+    self.isMuted = isMuted
+    self.speedOption = speedOption
+    self.forcePlay = forcePlay
+  }
+
+  var body: some View {
+    Group {
+      if let player = player {
+        BaseVideoPlayerView(player: player)
+          .opacity(opacity)
+      } else {
+        Rectangle()
+          .fill(Color.gray.opacity(0.3))
+          .opacity(opacity)
+      }
+    }
+    .onAppear {
+      setupPlayer()
+    }
+    .onDisappear {
+      cleanup()
+    }
+    .onChange(of: forcePlay) { _, shouldPlay in
+      if shouldPlay && isAssetReady {
+        startPlayback()
+        withAnimation(.easeIn(duration: 0.3)) {
+          opacity = 1.0
+        }
+      } else {
+        stopPlayback()
+        withAnimation(.easeOut(duration: 0.2)) {
+          opacity = 0.0
+        }
+      }
+    }
+  }
+
+  private func setupPlayer() {
+    let asset = AVURLAsset(url: url)
+    let playerItem = AVPlayerItem(asset: asset)
+    player = AVPlayer(playerItem: playerItem)
+    player?.isMuted = isMuted
+
+    Task {
+      do {
+        let loadedDuration = try await asset.load(.duration)
+        await MainActor.run {
+          duration = loadedDuration.seconds
+          isAssetReady = true
+          if forcePlay {
+            startPlayback()
+            withAnimation(.easeIn(duration: 0.3)) {
+              opacity = 1.0
+            }
+          }
+        }
+      } catch {
+        // Handle error silently
+      }
+    }
+  }
+
+  private func startPlayback() {
+    guard let player = player else { return }
+
+    let startTime = duration * 0.02
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
       player.rate = Float(self.speedOption.rawValue)
       player.play()
     }
 
-    playbackEndObserver = NotificationCenter.default.addObserver(
+    playbackObserver = NotificationCenter.default.addObserver(
       forName: .AVPlayerItemDidPlayToEndTime,
       object: player.currentItem,
       queue: .main
-    ) { _ in
-      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
+    ) { [player] _ in
+      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
         player.rate = Float(self.speedOption.rawValue)
         player.play()
       }
@@ -675,43 +473,285 @@ struct SpeedClipPreview: View {
 
   private func stopPlayback() {
     player?.pause()
-    player?.rate = 0
-    if let observer = playbackEndObserver {
+    if let observer = playbackObserver {
       NotificationCenter.default.removeObserver(observer)
-      playbackEndObserver = nil
+      playbackObserver = nil
     }
+  }
+
+  private func cleanup() {
+    stopPlayback()
+    player = nil
+    isAssetReady = false
+    opacity = 0
+  }
+}
+
+// MARK: - Video Clip Preview
+
+struct VideoClipPreview: View {
+  let url: URL
+  let clipTimes: [Double]
+  let isMuted: Bool
+
+  @State private var player: AVPlayer?
+  @State private var currentClip = 0
+  @State private var timer: Timer?
+  @State private var playbackObserver: NSObjectProtocol?
+
+  private let clipLength: Double = 3.0
+
+  var body: some View {
+    Group {
+      if let player = player {
+        BaseVideoPlayerView(player: player)
+      } else {
+        Rectangle()
+          .fill(Color.gray.opacity(0.3))
+      }
+    }
+    .onAppear {
+      setupPlayer()
+    }
+    .onDisappear {
+      cleanup()
+    }
+  }
+
+  private func setupPlayer() {
+    let asset = AVURLAsset(url: url)
+    let playerItem = AVPlayerItem(asset: asset)
+    player = AVPlayer(playerItem: playerItem)
+    player?.isMuted = isMuted
+
+    Task {
+      do {
+        _ = try await asset.load(.duration)
+        await MainActor.run {
+          startClipPlayback()
+        }
+      } catch {
+        // Handle error silently
+      }
+    }
+  }
+
+  private func startClipPlayback() {
+    guard let player = player, !clipTimes.isEmpty else { return }
+
+    currentClip = 0
+    playCurrentClip()
+  }
+
+  private func playCurrentClip() {
+    guard let player = player, !clipTimes.isEmpty else { return }
+
+    let startTime = clipTimes[currentClip]
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
+      player.play()
+    }
+
+    timer?.invalidate()
+    timer = Timer.scheduledTimer(withTimeInterval: clipLength, repeats: false) { [self] _ in
+      currentClip = (currentClip + 1) % clipTimes.count
+      playCurrentClip()
+    }
+  }
+
+  private func stopPlayback() {
+    player?.pause()
+    timer?.invalidate()
+    timer = nil
+  }
+
+  private func cleanup() {
+    stopPlayback()
+    player = nil
+  }
+}
+
+// MARK: - Speed Clip Preview
+
+struct SpeedClipPreview: View {
+  let url: URL
+  let isMuted: Bool
+  let speedOption: SpeedOption
+
+  @State private var player: AVPlayer?
+  @State private var duration: Double = 0
+  @State private var playbackObserver: NSObjectProtocol?
+
+  var body: some View {
+    Group {
+      if let player = player {
+        BaseVideoPlayerView(player: player)
+      } else {
+        Rectangle()
+          .fill(Color.gray.opacity(0.3))
+      }
+    }
+    .onAppear {
+      setupPlayer()
+    }
+    .onDisappear {
+      cleanup()
+    }
+  }
+
+  private func setupPlayer() {
+    let asset = AVURLAsset(url: url)
+    let playerItem = AVPlayerItem(asset: asset)
+    player = AVPlayer(playerItem: playerItem)
+    player?.isMuted = isMuted
+
+    Task {
+      do {
+        let loadedDuration = try await asset.load(.duration)
+        await MainActor.run {
+          duration = loadedDuration.seconds
+          startSpeedPlayback()
+        }
+      } catch {
+        // Handle error silently
+      }
+    }
+  }
+
+  private func startSpeedPlayback() {
+    guard let player = player else { return }
+
+    let startTime = duration * 0.02
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
+      player.rate = Float(self.speedOption.rawValue)
+      player.play()
+    }
+
+    playbackObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: player.currentItem,
+      queue: .main
+    ) { [player] _ in
+      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
+        player.rate = Float(self.speedOption.rawValue)
+        player.play()
+      }
+    }
+  }
+
+  private func stopPlayback() {
+    player?.pause()
+    if let observer = playbackObserver {
+      NotificationCenter.default.removeObserver(observer)
+      playbackObserver = nil
+    }
+  }
+
+  private func cleanup() {
+    stopPlayback()
+    player = nil
+  }
+}
+
+// MARK: - Single Clip Preview
+
+/// Simple video clip preview that plays a single clip at a specific time
+struct SingleClipPreview: View {
+  let url: URL
+  let startTime: Double
+  let isMuted: Bool
+
+  @State private var player: AVPlayer?
+  @State private var playbackObserver: NSObjectProtocol?
+
+  private let clipLength: Double = 3.0
+
+  var body: some View {
+    Group {
+      if let player = player {
+        BaseVideoPlayerView(player: player)
+      } else {
+        Rectangle()
+          .fill(Color.gray.opacity(0.3))
+      }
+    }
+    .onAppear {
+      setupPlayer()
+    }
+    .onDisappear {
+      cleanup()
+    }
+  }
+
+  private func setupPlayer() {
+    // Add a small delay to prevent too many simultaneous player creations
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+      let asset = AVURLAsset(url: self.url)
+      let playerItem = AVPlayerItem(asset: asset)
+      self.player = AVPlayer(playerItem: playerItem)
+      self.player?.isMuted = self.isMuted
+
+      Task {
+        do {
+          _ = try await asset.load(.duration)
+          await MainActor.run {
+            self.startClipPlayback()
+          }
+        } catch {
+          // Handle error silently
+        }
+      }
+    }
+  }
+
+  private func startClipPlayback() {
+    guard let player = player else { return }
+
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
+      player.play()
+    }
+
+    // Set up looping for this specific clip
+    playbackObserver = NotificationCenter.default.addObserver(
+      forName: .AVPlayerItemDidPlayToEndTime,
+      object: player.currentItem,
+      queue: .main
+    ) { [player] _ in
+      player.seek(to: CMTime(seconds: self.startTime, preferredTimescale: 600)) { [player] _ in
+        player.play()
+      }
+    }
+  }
+
+  private func stopPlayback() {
+    player?.pause()
+    if let observer = playbackObserver {
+      NotificationCenter.default.removeObserver(observer)
+      playbackObserver = nil
+    }
+  }
+
+  private func cleanup() {
+    stopPlayback()
+    player = nil
   }
 }
 
 // MARK: - Utility Functions
 
-/// Generates static thumbnail for batch list views
-/// - Parameters:
-///   - url: Video file URL
-///   - time: Time offset for thumbnail
-///   - completion: Completion handler with generated image
-func generateStaticThumbnail(for url: URL, at time: Double, completion: @escaping (Image?) -> Void)
-{
-  DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.01) {
-    let asset = AVAsset(url: url)
-    let generator = AVAssetImageGenerator(asset: asset)
-    generator.appliesPreferredTrackTransform = true
-    generator.maximumSize = CGSize(width: 600, height: 338)
-    generator.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
-    generator.requestedTimeToleranceAfter = CMTime(seconds: 0.1, preferredTimescale: 600)
+/// Generate a static thumbnail for video file
+func generateStaticThumbnail(for url: URL) async -> Image? {
+  let asset = AVURLAsset(url: url)
+  let generator = AVAssetImageGenerator(asset: asset)
+  generator.appliesPreferredTrackTransform = true
+  generator.maximumSize = CGSize(width: 300, height: 200)
 
-    let actualTime = max(time, 0.1)
-    let cmTime = CMTime(seconds: actualTime, preferredTimescale: 600)
-
-    if let cgImage = try? generator.copyCGImage(at: cmTime, actualTime: nil) {
-      let image = Image(decorative: cgImage, scale: 1.0)
-      DispatchQueue.main.async {
-        completion(image)
-      }
-    } else {
-      DispatchQueue.main.async {
-        completion(nil)
-      }
-    }
+  do {
+    let time = CMTime(seconds: 1.0, preferredTimescale: 600)
+    let cgImage = try generator.copyCGImage(at: time, actualTime: nil)
+    let nsImage = NSImage(
+      cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    return Image(nsImage: nsImage)
+  } catch {
+    return nil
   }
 }
