@@ -3650,13 +3650,6 @@ struct FolderHoverLoopPreview: View {
     player = AVPlayer(playerItem: playerItem)
     player?.isMuted = isMuted
 
-    // Add periodic time observer (less frequent for better performance)
-    let interval = CMTime(seconds: 0.2, preferredTimescale: CMTimeScale(NSEC_PER_SEC))
-    periodicTimeObserver = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) {
-      time in
-      // Removed debug print for performance
-    }
-
     // Start playback based on type
     if playbackType == .clips {
       startLoopingClips()
@@ -3842,14 +3835,6 @@ struct SingleSpeedPlayerFill: View {
         newPlayer.isMuted = isMuted
         player = newPlayer
 
-        // Add periodic time observer for debugging
-        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
-        periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
-          forInterval: interval, queue: .main
-        ) { time in
-          // Removed debug print for performance
-        }
-
         // Add rate observer (but don't interfere with intentional pausing)
         rateObserver = newPlayer.addPeriodicTimeObserver(
           forInterval: CMTime(seconds: 0.1, preferredTimescale: 600),
@@ -4017,14 +4002,6 @@ struct SpeedClipPreview: View {
         let newPlayer = AVPlayer(playerItem: item)
         newPlayer.isMuted = isMuted
         player = newPlayer
-
-        // Add periodic time observer for debugging
-        let interval = CMTime(seconds: 0.5, preferredTimescale: 600)
-        periodicTimeObserver = newPlayer.addPeriodicTimeObserver(
-          forInterval: interval, queue: .main
-        ) { time in
-          // Removed debug print for performance
-        }
 
         // Add rate observer (but don't interfere with intentional pausing)
         rateObserver = newPlayer.addPeriodicTimeObserver(
