@@ -16,8 +16,11 @@ struct BatchListRowView: View {
   let fileInfo: FileInfo?
   let isRowHovered: Bool
   let onHoverChanged: (Bool) -> Void
+  let onDoubleClick: () -> Void
+  let onShiftClick: () -> Void
 
-  @State private var thumbnail: Image?
+  @State private var clipThumbnails: [Int: Image] = [:]
+  @State private var thumbnailRequestIds: [UUID] = []
   @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
 
   var body: some View {
@@ -31,8 +34,8 @@ struct BatchListRowView: View {
         HStack(spacing: 2) {
           ForEach(Array(times.enumerated()), id: \.offset) { index, time in
             ZStack {
-              // Background thumbnail
-              if let thumbnail = thumbnail {
+              // Background thumbnail - unique for each clip
+              if let thumbnail = clipThumbnails[index] {
                 thumbnail
                   .resizable()
                   .aspectRatio(16 / 9, contentMode: .fill)
@@ -89,7 +92,7 @@ struct BatchListRowView: View {
 
         ZStack {
           // Background thumbnail
-          if let thumbnail = thumbnail {
+          if let thumbnail = clipThumbnails[0] {
             thumbnail
               .resizable()
               .aspectRatio(contentMode: .fill)
@@ -171,24 +174,49 @@ struct BatchListRowView: View {
     .onHover { hovering in
       onHoverChanged(hovering)
     }
+    .onTapGesture(count: 2) {
+      print("Double-click detected on batch row: \(url.lastPathComponent)")
+      onDoubleClick()
+    }
+    .simultaneousGesture(
+      TapGesture()
+        .modifiers(.shift)
+        .onEnded {
+          onShiftClick()
+        }
+    )
     .onTapGesture {
       isSelected.toggle()
     }
     .task {
-      // Load thumbnail for fallback display - only if not already loaded
-      guard thumbnail == nil else { return }
+      // Load thumbnails for each clip at their specific times
+      for (index, time) in times.enumerated() {
+        // Skip if already loaded
+        guard clipThumbnails[index] == nil else { continue }
 
-      if let cached = ThumbnailCache.shared.get(for: thumbnailKey(url: url, time: 1.0)) {
-        thumbnail = cached
-      } else {
-        // Delay thumbnail generation to reduce load during scrolling
-        try? await Task.sleep(nanoseconds: 100_000_000)  // 0.1 second delay
+        let cacheKey = thumbnailKey(url: url, time: time)
 
-        if let generated = await generateStaticThumbnail(for: url) {
-          thumbnail = generated
-          ThumbnailCache.shared.set(generated, for: thumbnailKey(url: url, time: 1.0))
+        if let cached = ThumbnailCache.shared.get(for: cacheKey) {
+          clipThumbnails[index] = cached
+        } else {
+          // Use throttled thumbnail generation with normal priority for batch thumbnails
+          let requestId = ThumbnailCache.shared.requestThumbnail(
+            for: url, at: time, priority: .normal
+          ) { image in
+            Task { @MainActor in
+              self.clipThumbnails[index] = image
+            }
+          }
+          thumbnailRequestIds.append(requestId)
         }
       }
+    }
+    .onDisappear {
+      // Cancel pending thumbnail requests when view disappears
+      for requestId in thumbnailRequestIds {
+        ThumbnailCache.shared.cancelRequest(requestId)
+      }
+      thumbnailRequestIds.removeAll()
     }
   }
 }
@@ -201,6 +229,9 @@ struct FilterControls: View {
   @Binding var filterLength: FilterLengthOption
   @Binding var filterResolution: FilterResolutionOption
   @Binding var filterFileType: FilterFileTypeOption
+  @Binding var sortOption: SortOption
+  @Binding var sortAscending: Bool
+  let onSortChange: () -> Void
   @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
 
   var body: some View {
@@ -254,6 +285,26 @@ struct FilterControls: View {
         .buttonStyle(.bordered)
         .font(.caption)
       }
+
+      // Sort controls
+      Picker("Sort by", selection: $sortOption) {
+        ForEach(SortOption.allCases) { option in
+          Text(option.rawValue).tag(option)
+        }
+      }
+      .pickerStyle(.menu)
+      .frame(width: 140)
+      .onChange(of: sortOption) { _, _ in
+        onSortChange()
+      }
+
+      Button(action: {
+        sortAscending.toggle()
+        onSortChange()
+      }) {
+        Image(systemName: sortAscending ? "arrow.up" : "arrow.down")
+      }
+      .buttonStyle(.bordered)
 
       Spacer()
 
@@ -428,6 +479,7 @@ struct SettingsBar: View {
               set: { onDeleteHotkeyChange($0.uppercased()) }
             ),
             onCommit: {
+              hotkeyFieldFocused.wrappedValue = false
               DispatchQueue.main.async {
                 NSApp.keyWindow?.makeFirstResponder(nil)
               }
@@ -438,6 +490,9 @@ struct SettingsBar: View {
           .textFieldStyle(.roundedBorder)
           .disabled(isTextFieldDisabled)
           .focused(hotkeyFieldFocused)
+          .onTapGesture {
+            // Clear focus when tapping elsewhere
+          }
         }
 
         HStack(spacing: 2) {
@@ -449,6 +504,7 @@ struct SettingsBar: View {
               set: { onKeepHotkeyChange($0.uppercased()) }
             ),
             onCommit: {
+              hotkeyFieldFocused.wrappedValue = false
               DispatchQueue.main.async {
                 NSApp.keyWindow?.makeFirstResponder(nil)
               }
@@ -459,6 +515,9 @@ struct SettingsBar: View {
           .textFieldStyle(.roundedBorder)
           .disabled(isTextFieldDisabled)
           .focused(hotkeyFieldFocused)
+          .onTapGesture {
+            // Clear focus when tapping elsewhere
+          }
         }
 
         HStack(spacing: 4) {

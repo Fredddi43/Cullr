@@ -4,52 +4,7 @@ import SwiftUI
 
 // MARK: - Video Thumbnail with Caching and Preview
 
-/// High-performance thumbnail cache with memory management
-@MainActor
-class ThumbnailCache: ObservableObject {
-  static let shared = ThumbnailCache()
-  private var cache: [String: Image] = [:]
-  private let maxCacheSize = 500  // Limit cache size for memory efficiency
-  private var accessOrder: [String] = []  // LRU tracking
-
-  private init() {}
-
-  func get(for key: String) -> Image? {
-    if let image = cache[key] {
-      // Move to end for LRU
-      accessOrder.removeAll { $0 == key }
-      accessOrder.append(key)
-      return image
-    }
-    return nil
-  }
-
-  func set(_ image: Image, for key: String) {
-    // Remove if already exists
-    if cache[key] != nil {
-      accessOrder.removeAll { $0 == key }
-    }
-
-    // Add new entry
-    cache[key] = image
-    accessOrder.append(key)
-
-    // Enforce cache size limit
-    while cache.count > maxCacheSize {
-      if let oldestKey = accessOrder.first {
-        cache.removeValue(forKey: oldestKey)
-        accessOrder.removeFirst()
-      }
-    }
-  }
-
-  func clear() {
-    cache.removeAll()
-    accessOrder.removeAll()
-  }
-
-  var cacheSize: Int { cache.count }
-}
+// MARK: - Video Thumbnail with Caching and Preview
 
 /// Video thumbnail view with hover preview functionality
 struct VideoThumbnailView: View {
@@ -62,24 +17,17 @@ struct VideoThumbnailView: View {
   @State private var thumbnail: Image?
   @State private var isHovering = false
   @State private var hoverStartTime: Date?
+  @State private var thumbnailRequestId: UUID?
+  @State private var isVisible = false
+  @State private var loadingTask: Task<Void, Never>?
 
   var body: some View {
     ZStack {
-      // Static thumbnail
-      if let staticThumb = staticThumbnails[thumbnailKey(url: url, time: 1.0)] {
-        staticThumb
-          .resizable()
-          .aspectRatio(contentMode: .fill)
-      } else if let thumb = thumbnail {
-        thumb
-          .resizable()
-          .aspectRatio(contentMode: .fill)
-      } else {
-        Rectangle()
-          .fill(Color.gray.opacity(0.3))
-      }
+      // NUCLEAR OPTION: Always show gray placeholder, no thumbnail generation in folder view
+      Rectangle()
+        .fill(Color.gray.opacity(0.3))
 
-      // Hover preview overlay
+      // Hover preview overlay - only generate thumbnails on hover
       if isHovering {
         HoverPreviewCard(
           url: url,
@@ -102,7 +50,19 @@ struct VideoThumbnailView: View {
       }
     }
     .onAppear {
-      loadThumbnail()
+      isVisible = true
+      // NUCLEAR OPTION: No thumbnail loading at all in folder view
+    }
+    .onDisappear {
+      isVisible = false
+      loadingTask?.cancel()
+      loadingTask = nil
+
+      // Cancel pending thumbnail request when view disappears
+      if let requestId = thumbnailRequestId {
+        ThumbnailCache.shared.cancelRequest(requestId)
+        thumbnailRequestId = nil
+      }
     }
   }
 
@@ -111,22 +71,9 @@ struct VideoThumbnailView: View {
     return Date().timeIntervalSince(startTime) > 0.8  // 800ms delay
   }
 
-  private func loadThumbnail() {
-    let key = thumbnailKey(url: url, time: 1.0)
-
-    if let cached = ThumbnailCache.shared.get(for: key) {
-      thumbnail = cached
-      return
-    }
-
-    Task {
-      if let generated = await generateStaticThumbnail(for: url) {
-        await MainActor.run {
-          thumbnail = generated
-          ThumbnailCache.shared.set(generated, for: key)
-        }
-      }
-    }
+  private func loadThumbnail() async {
+    // NUCLEAR OPTION: Disabled to prevent freezing
+    return
   }
 }
 
@@ -270,6 +217,7 @@ struct FolderHoverLoopPreview: View {
   @State private var opacity: Double = 0
   @State private var duration: Double = 0
   @State private var startTimes: [Double] = []
+  @State private var clipOpacity: Double = 1.0
 
   private let clipLength: Float = 3.0
 
@@ -283,7 +231,7 @@ struct FolderHoverLoopPreview: View {
     Group {
       if let player = player {
         BaseVideoPlayerView(player: player)
-          .opacity(opacity)
+          .opacity(opacity * clipOpacity)
       } else {
         Rectangle()
           .fill(Color.gray.opacity(0.3))
@@ -353,8 +301,19 @@ struct FolderHoverLoopPreview: View {
 
     timer?.invalidate()
     timer = Timer.scheduledTimer(withTimeInterval: Double(clipLength), repeats: false) { [self] _ in
-      currentClip = (currentClip + 1) % startTimes.count
-      playClip()
+      // Simple fadeover to next clip
+      withAnimation(.easeInOut(duration: 0.3)) {
+        clipOpacity = 0.0
+      }
+
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        currentClip = (currentClip + 1) % startTimes.count
+        playClip()
+
+        withAnimation(.easeInOut(duration: 0.3)) {
+          clipOpacity = 1.0
+        }
+      }
     }
   }
 
@@ -369,6 +328,7 @@ struct FolderHoverLoopPreview: View {
     player = nil
     isAssetReady = false
     opacity = 0
+    clipOpacity = 1.0
   }
 }
 
@@ -423,6 +383,11 @@ struct FolderSpeedPreview: View {
         }
       }
     }
+    .onChange(of: speedOption) { _, newSpeed in
+      if let player = player, isAssetReady && forcePlay {
+        player.rate = Float(newSpeed.rawValue)
+      }
+    }
   }
 
   private func setupPlayer() {
@@ -455,8 +420,8 @@ struct FolderSpeedPreview: View {
 
     let startTime = duration * 0.02
     player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
-      player.rate = Float(self.speedOption.rawValue)
       player.play()
+      player.rate = Float(self.speedOption.rawValue)
     }
 
     playbackObserver = NotificationCenter.default.addObserver(
@@ -465,8 +430,8 @@ struct FolderSpeedPreview: View {
       queue: .main
     ) { [player] _ in
       player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
-        player.rate = Float(self.speedOption.rawValue)
         player.play()
+        player.rate = Float(self.speedOption.rawValue)
       }
     }
   }
@@ -738,20 +703,20 @@ struct SingleClipPreview: View {
 
 // MARK: - Utility Functions
 
-/// Generate a static thumbnail for video file
+/// Generate a static thumbnail for video file (legacy support)
 func generateStaticThumbnail(for url: URL) async -> Image? {
-  let asset = AVURLAsset(url: url)
-  let generator = AVAssetImageGenerator(asset: asset)
-  generator.appliesPreferredTrackTransform = true
-  generator.maximumSize = CGSize(width: 300, height: 200)
+  return await withCheckedContinuation { continuation in
+    ThumbnailCache.shared.requestThumbnail(for: url, at: 1.0) { image in
+      continuation.resume(returning: image)
+    }
+  }
+}
 
-  do {
-    let time = CMTime(seconds: 1.0, preferredTimescale: 600)
-    let cgImage = try generator.copyCGImage(at: time, actualTime: nil)
-    let nsImage = NSImage(
-      cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
-    return Image(nsImage: nsImage)
-  } catch {
-    return nil
+/// Generate a static thumbnail for video file at a specific time (legacy support)
+func generateStaticThumbnailAtTime(for url: URL, at timeInSeconds: Double) async -> Image? {
+  return await withCheckedContinuation { continuation in
+    ThumbnailCache.shared.requestThumbnail(for: url, at: timeInSeconds) { image in
+      continuation.resume(returning: image)
+    }
   }
 }

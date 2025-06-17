@@ -12,11 +12,69 @@ struct ContentView: View {
   @FocusState private var hotkeyFieldFocused: Bool
 
   var body: some View {
+    mainViewWithOverlays
+      .contentShape(Rectangle())
+      .onTapGesture {
+        // Clear hotkey field focus when tapping anywhere in the window
+        hotkeyFieldFocused = false
+        DispatchQueue.main.async {
+          NSApp.keyWindow?.makeFirstResponder(nil)
+        }
+      }
+      .onAppear {
+        appState.setupHotkeyMonitoring()
+      }
+      .alert(isPresented: $appState.showAlert) {
+        createAlert()
+      }
+  }
+
+  private var mainViewWithOverlays: some View {
     ZStack {
       mainContent
 
-      // Non-blocking progress indicator
-      if appState.fileManager.isLoading && appState.fileManager.thumbnailsToLoad > 0 {
+      // Folder collection navigation bar
+      if appState.folderCollection.count > 1 {
+        FolderCollectionBottomBar(
+          folderURL: appState.folderURL,
+          currentFolderIndex: appState.currentFolderIndex,
+          folderCollectionCount: appState.folderCollection.count,
+          onPreviousFolder: {
+            appState.navigateToPreviousFolder()
+          },
+          onNextFolder: {
+            appState.navigateToNextFolder()
+          },
+          onDeleteFolder: {
+            appState.deleteCurrentFolder()
+          }
+        )
+      }
+
+      // Main loading overlay for folder loading
+      if appState.isLoadingFolders {
+        Color.black.opacity(0.3)
+          .ignoresSafeArea()
+
+        VStack(spacing: 16) {
+          ProgressView(value: appState.loadingProgress)
+            .frame(width: 300)
+
+          Text(appState.loadingMessage)
+            .font(.headline)
+            .foregroundColor(.primary)
+
+          Text("\(Int(appState.loadingProgress * 100))% Complete")
+            .font(.caption)
+            .foregroundColor(.secondary)
+        }
+        .padding(24)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
+        .shadow(radius: 10)
+      }
+
+      // Non-blocking progress indicator for file info
+      else if appState.fileManager.isLoading && appState.fileManager.thumbnailsToLoad > 0 {
         VStack {
           Spacer()
           HStack {
@@ -39,12 +97,6 @@ struct ContentView: View {
           }
         }
       }
-    }
-    .onAppear {
-      appState.setupHotkeyMonitoring()
-    }
-    .alert(isPresented: $appState.showAlert) {
-      createAlert()
     }
   }
 
@@ -129,23 +181,31 @@ struct ContentView: View {
         onPlaybackModeChange: { appState.playbackMode = $0 }
       )
 
-      Divider()
-
       FilterControls(
         filterSize: $appState.filterSize,
         filterLength: $appState.filterLength,
         filterResolution: $appState.filterResolution,
-        filterFileType: $appState.filterFileType
+        filterFileType: $appState.filterFileType,
+        sortOption: $appState.sortOption,
+        sortAscending: $appState.sortAscending,
+        onSortChange: {
+          Task {
+            await appState.applySorting()
+          }
+        }
       )
       .padding(.horizontal)
-
-      Divider()
 
       folderVideoGrid
 
       if !appState.selectedURLs.isEmpty {
         Divider()
         folderSelectionControls
+      }
+
+      // Add padding when folder collection bar is present to prevent overlay
+      if appState.folderCollection.count > 1 {
+        Spacer().frame(height: 30)
       }
     }
   }
@@ -211,8 +271,19 @@ struct ContentView: View {
             .foregroundColor(.secondary)
         }
       }
-      .frame(width: playerPreviewSize * 0.545, alignment: .leading)
+      .frame(width: max(playerPreviewSize * 0.545, 180), alignment: .leading)
     }
+    .onTapGesture(count: 2) {
+      print("Double-click detected on: \(url.lastPathComponent)")
+      appState.openInFileManager(url: url)
+    }
+    .simultaneousGesture(
+      TapGesture()
+        .modifiers(.shift)
+        .onEnded {
+          appState.selectRange(to: url)
+        }
+    )
     .onTapGesture {
       appState.toggleSelection(for: url)
     }
@@ -284,15 +355,20 @@ struct ContentView: View {
         onPlaybackModeChange: { appState.playbackMode = $0 }
       )
 
-      Divider()
-
       // Filter controls
       VStack(spacing: 8) {
         FilterControls(
           filterSize: $appState.filterSize,
           filterLength: $appState.filterLength,
           filterResolution: $appState.filterResolution,
-          filterFileType: $appState.filterFileType
+          filterFileType: $appState.filterFileType,
+          sortOption: $appState.sortOption,
+          sortAscending: $appState.sortAscending,
+          onSortChange: {
+            Task {
+              await appState.applySorting()
+            }
+          }
         )
         .padding(.horizontal)
 
@@ -313,8 +389,6 @@ struct ContentView: View {
       }
       .padding(.vertical, 8)
 
-      Divider()
-
       // Video list
       ScrollView {
         LazyVStack(spacing: 12) {
@@ -334,6 +408,12 @@ struct ContentView: View {
               isRowHovered: appState.hoveredBatchRow == url,
               onHoverChanged: { hovering in
                 appState.hoveredBatchRow = hovering ? url : nil
+              },
+              onDoubleClick: {
+                appState.openInFileManager(url: url)
+              },
+              onShiftClick: {
+                appState.selectRange(to: url)
               }
             )
 
@@ -350,6 +430,11 @@ struct ContentView: View {
       if !appState.selectedURLs.isEmpty {
         Divider()
         batchSelectionControls
+      }
+
+      // Add padding when folder collection bar is present to prevent overlay
+      if appState.folderCollection.count > 1 {
+        Spacer().frame(height: 30)
       }
     }
   }
@@ -422,19 +507,24 @@ struct ContentView: View {
         onPlaybackModeChange: { appState.playbackMode = $0 }
       )
 
-      Divider()
+      // Player size slider (consistent with other views)
+      PlayerSizeSlider(compact: false)
+        .padding(.horizontal)
 
-      // Video player section
-      VStack {
-        if appState.currentIndex < appState.videoURLs.count {
-          let url = appState.videoURLs[appState.currentIndex]
+      // Video player section - properly sized to fit window
+      if appState.currentIndex < appState.videoURLs.count {
+        let url = appState.videoURLs[appState.currentIndex]
 
+        VStack(spacing: 8) {
+          // Video player - takes available space
           if appState.playbackType == .speed {
             SpeedPlayer(
               url: url,
               speedOption: $appState.speedOption,
               isMuted: $appState.isMuted
             )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .aspectRatio(16 / 9, contentMode: .fit)
           } else {
             ClipLoopingPlayer(
               url: url,
@@ -442,8 +532,26 @@ struct ContentView: View {
               clipLength: appState.clipLength,
               isMuted: $appState.isMuted
             )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .aspectRatio(16 / 9, contentMode: .fit)
           }
 
+          // Media info at bottom (matching folder view style)
+          VStack(alignment: .leading, spacing: 4) {
+            Text(url.lastPathComponent)
+              .font(.caption)
+              .lineLimit(2)
+              .truncationMode(.middle)
+
+            if let info = appState.fileManager.fileInfo[url] {
+              Text("\(info.size) • \(info.duration)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            }
+          }
+          .frame(maxWidth: .infinity, alignment: .leading)
+
+          // Controls at bottom
           HStack {
             Button("Delete") {
               appState.deleteCurrentVideo()
@@ -465,7 +573,6 @@ struct ContentView: View {
           .padding()
         }
       }
-      .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
   }
 
@@ -506,101 +613,137 @@ struct ContentView: View {
         onPlaybackModeChange: { appState.playbackMode = $0 }
       )
 
-      Divider()
+      // Player size slider (consistent with other views)
+      PlayerSizeSlider(compact: false)
+        .padding(.horizontal)
 
-      // Video players section
-      VStack(spacing: 16) {
-        HStack(spacing: 16) {
-          // Left video
-          if appState.currentIndex < appState.videoURLs.count {
-            videoPlayerCard(url: appState.videoURLs[appState.currentIndex], title: "Left")
-          }
+      // Video clips section - all clips from current video playing side-by-side
+      if appState.currentIndex < appState.videoURLs.count {
+        let url = appState.videoURLs[appState.currentIndex]
+        let clipTimes = getClipTimes(for: url, count: appState.numberOfClips)
 
-          // Right video
-          if appState.currentIndex + 1 < appState.videoURLs.count {
-            videoPlayerCard(url: appState.videoURLs[appState.currentIndex + 1], title: "Right")
-          }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 16) {
+          // Display clips in multi-row grid
+          GeometryReader { geometry in
+            let availableWidth = geometry.size.width - 32  // Account for padding
+            let clipWidth = playerPreviewSize * 0.545
+            let clipHeight = playerPreviewSize * 0.309
+            let spacing: CGFloat = 8
+            let clipsPerRow = max(1, Int((availableWidth + spacing) / (clipWidth + spacing)))
+            let rows = Array(clipTimes.enumerated()).chunked(into: clipsPerRow)
 
-        // Controls
-        HStack {
-          Button("Delete Left") {
-            appState.deleteCurrentVideo()
-          }
-          .keyboardShortcut(KeyEquivalent(Character(appState.deleteHotkey)), modifiers: [])
+            ScrollView {
+              VStack(spacing: 8) {
+                ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, rowClips in
+                  HStack(spacing: 8) {
+                    ForEach(rowClips, id: \.offset) { index, startTime in
+                      VStack(spacing: 4) {
+                        // Individual clip player
+                        SingleClipPlayer(
+                          url: url,
+                          startTime: startTime,
+                          clipLength: appState.clipLength,
+                          isMuted: appState.isMuted
+                        )
+                        .frame(width: clipWidth, height: clipHeight)
+                        .cornerRadius(8)
 
-          Button("Delete Right") {
-            if appState.currentIndex + 1 < appState.videoURLs.count {
-              let url = appState.videoURLs[appState.currentIndex + 1]
-              appState.filesPendingDeletion = [url]
-              appState.alertType = .fileDelete
-              appState.showAlert = true
+                        // Clip number label
+                        Text("Clip \(index + 1)")
+                          .font(.caption)
+                          .foregroundColor(.secondary)
+                      }
+                    }
+
+                    // Fill remaining space in row
+                    Spacer()
+                  }
+                }
+              }
+              .padding(.horizontal)
             }
           }
-          .disabled(appState.currentIndex + 1 >= appState.videoURLs.count)
 
-          Spacer()
+          // Media info at bottom (matching folder view style)
+          VStack(alignment: .leading, spacing: 4) {
+            Text(url.lastPathComponent)
+              .font(.caption)
+              .lineLimit(2)
+              .truncationMode(.middle)
 
-          Text(
-            "\(appState.currentIndex + 1)-\(min(appState.currentIndex + 2, appState.videoURLs.count)) of \(appState.videoURLs.count)"
-          )
-          .font(.caption)
+            if let info = appState.fileManager.fileInfo[url] {
+              Text("\(info.size) • \(info.duration)")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            }
+          }
+          .frame(maxWidth: .infinity, alignment: .leading)
 
-          Spacer()
+          // Controls at bottom
+          HStack {
+            Button("Delete") {
+              appState.deleteCurrentVideo()
+            }
+            .keyboardShortcut(KeyEquivalent(Character(appState.deleteHotkey)), modifiers: [])
 
-          Button("Keep Both") {
-            appState.skipCurrentVideo()
-            if appState.currentIndex < appState.videoURLs.count {
+            Spacer()
+
+            Text("\(appState.currentIndex + 1) of \(appState.videoURLs.count)")
+              .font(.caption)
+
+            Spacer()
+
+            Button("Keep") {
               appState.skipCurrentVideo()
             }
+            .keyboardShortcut(KeyEquivalent(Character(appState.keepHotkey)), modifiers: [])
           }
-          .keyboardShortcut(KeyEquivalent(Character(appState.keepHotkey)), modifiers: [])
+          .padding()
         }
-        .padding()
+        .padding(.top, 16)
       }
-      .padding(.top, 16)
     }
-  }
-
-  private func videoPlayerCard(url: URL, title: String) -> some View {
-    VStack {
-      if appState.playbackType == .speed {
-        SpeedPlayer(
-          url: url,
-          speedOption: $appState.speedOption,
-          isMuted: $appState.isMuted
-        )
-      } else {
-        ClipLoopingPlayer(
-          url: url,
-          numberOfClips: appState.numberOfClips,
-          clipLength: appState.clipLength,
-          isMuted: $appState.isMuted
-        )
-      }
-
-      Text(url.lastPathComponent)
-        .font(.caption)
-        .lineLimit(1)
-    }
-    .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .aspectRatio(16 / 9, contentMode: .fit)
   }
 
   // MARK: - Actions
 
   private func selectFolder() {
+    let startTime = Date()
+    print("🚨 FREEZE DEBUG: selectFolder STARTED at \(startTime)")
+
     let panel = NSOpenPanel()
     panel.canChooseDirectories = true
     panel.canChooseFiles = false
-    panel.allowsMultipleSelection = false
+    panel.allowsMultipleSelection = true
+    panel.prompt = "Select Folders"
+    panel.message = "Select one or more folders to load videos from"
 
-    if panel.runModal() == .OK, let url = panel.url {
+    print("🚨 FREEZE DEBUG: About to show folder selection panel...")
+    if panel.runModal() == .OK {
+      let selectedURLs = panel.urls
+      print(
+        "🚨 FREEZE DEBUG: User selected \(selectedURLs.count) folders: \(selectedURLs.map { $0.lastPathComponent })"
+      )
+
       Task {
-        await appState.loadVideosAndThumbnails(from: url)
+        let taskStartTime = Date()
+        print("🚨 FREEZE DEBUG: Starting loadMultipleFolders task at \(taskStartTime)")
+
+        await appState.loadMultipleFolders(selectedURLs)
+
+        let taskEndTime = Date()
+        print(
+          "🚨 FREEZE DEBUG: loadMultipleFolders task COMPLETED at \(taskEndTime), duration: \(taskEndTime.timeIntervalSince(taskStartTime))s"
+        )
       }
+    } else {
+      print("🚨 FREEZE DEBUG: User cancelled folder selection")
     }
+
+    let endTime = Date()
+    print(
+      "🚨 FREEZE DEBUG: selectFolder COMPLETED at \(endTime), duration: \(endTime.timeIntervalSince(startTime))s"
+    )
   }
 
   private func createAlert() -> Alert {
@@ -664,6 +807,22 @@ struct ContentView: View {
         appState.folderCollection.removeAll { $0 == folderURL }
         if appState.currentFolderIndex >= appState.folderCollection.count {
           appState.currentFolderIndex = max(0, appState.folderCollection.count - 1)
+        }
+
+        // Load the next available folder if any remain
+        if !appState.folderCollection.isEmpty
+          && appState.currentFolderIndex < appState.folderCollection.count
+        {
+          let nextFolderURL = appState.folderCollection[appState.currentFolderIndex]
+          Task {
+            await appState.loadVideosAndThumbnails(from: nextFolderURL)
+          }
+        } else {
+          // No more folders, clear everything
+          appState.videoURLs.removeAll()
+          appState.folderURL = nil
+          appState.selectedURLs.removeAll()
+          appState.selectionOrder.removeAll()
         }
       }
     } catch {

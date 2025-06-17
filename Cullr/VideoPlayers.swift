@@ -233,10 +233,10 @@ struct VideoPlayerWithControls: View {
     if mode == .speed {
       if player.rate > 0 {
         player.pause()
-        player.rate = 0
         isPlaying = false
       } else {
         player.play()
+        // Always set the correct speed when resuming
         if let speed = currentSpeed {
           player.rate = Float(speed.rawValue)
         } else {
@@ -505,10 +505,9 @@ struct SpeedPlayer: View {
     guard let player = player else { return }
     let startTime = duration * 0.02
 
-    player.rate = Float(speedOption.rawValue)
     player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
-      player.rate = Float(self.speedOption.rawValue)
       player.play()
+      player.rate = Float(self.speedOption.rawValue)
     }
 
     playbackEndObserver = NotificationCenter.default.addObserver(
@@ -517,15 +516,18 @@ struct SpeedPlayer: View {
       queue: .main
     ) { _ in
       player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
-        player.rate = Float(self.speedOption.rawValue)
         player.play()
+        player.rate = Float(self.speedOption.rawValue)
       }
     }
   }
 
   private func updatePlaybackSpeed() {
     guard let player = player else { return }
-    player.rate = Float(speedOption.rawValue)
+    let wasPlaying = player.rate > 0
+    if wasPlaying {
+      player.rate = Float(speedOption.rawValue)
+    }
   }
 
   private func stopPlayback() {
@@ -539,6 +541,88 @@ struct SpeedPlayer: View {
 
   private func cleanup() {
     stopPlayback()
+    player = nil
+    didAppear = false
+  }
+}
+
+// MARK: - Single Clip Player
+
+/// Single clip player for side-by-side view - plays one specific clip on loop
+struct SingleClipPlayer: View {
+  let url: URL
+  let startTime: Double
+  let clipLength: Int
+  let isMuted: Bool
+
+  @State private var player: AVPlayer?
+  @State private var boundaryObserver: Any?
+  @State private var didAppear = false
+
+  var body: some View {
+    Group {
+      if let player = player {
+        BaseVideoPlayerView(player: player)
+      } else {
+        Rectangle()
+          .fill(Color.gray.opacity(0.3))
+      }
+    }
+    .onAppear {
+      if !didAppear {
+        didAppear = true
+        setupPlayer()
+      }
+    }
+    .onDisappear {
+      cleanup()
+    }
+  }
+
+  private func setupPlayer() {
+    let asset = AVURLAsset(url: url)
+    let playerItem = AVPlayerItem(asset: asset)
+    player = AVPlayer(playerItem: playerItem)
+    player?.isMuted = isMuted
+    player?.actionAtItemEnd = .none
+
+    startClipLoop()
+  }
+
+  private func startClipLoop() {
+    guard let player = player else { return }
+
+    let start = CMTime(seconds: startTime, preferredTimescale: 600)
+    let end = CMTime(seconds: startTime + Double(clipLength), preferredTimescale: 600)
+
+    // Remove any existing observer
+    if let observer = boundaryObserver {
+      player.removeTimeObserver(observer)
+      boundaryObserver = nil
+    }
+
+    // Seek to start and play
+    player.seek(to: start) { _ in
+      // Set up boundary observer to loop the clip
+      self.boundaryObserver = player.addBoundaryTimeObserver(
+        forTimes: [NSValue(time: end)],
+        queue: .main
+      ) {
+        // Loop back to start of this clip
+        player.seek(to: start) { _ in
+          player.play()
+        }
+      }
+      player.play()
+    }
+  }
+
+  private func cleanup() {
+    if let player = player, let observer = boundaryObserver {
+      player.removeTimeObserver(observer)
+      boundaryObserver = nil
+    }
+    player?.pause()
     player = nil
     didAppear = false
   }
