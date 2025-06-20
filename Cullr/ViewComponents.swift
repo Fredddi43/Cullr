@@ -15,6 +15,7 @@ struct BatchListRowView: View {
   @Binding var isSelected: Bool
   let fileInfo: FileInfo?
   let isRowHovered: Bool
+  let shouldPlayVideo: Bool
   let onHoverChanged: (Bool) -> Void
   let onDoubleClick: () -> Void
   let onShiftClick: () -> Void
@@ -22,6 +23,7 @@ struct BatchListRowView: View {
   @State private var clipThumbnails: [Int: Image] = [:]
   @State private var thumbnailRequestIds: [UUID] = []
   @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
+  @EnvironmentObject private var appState: AppState
 
   var body: some View {
     HStack(spacing: 12) {
@@ -49,8 +51,8 @@ struct BatchListRowView: View {
                   .cornerRadius(6)
               }
 
-              // Individual clip preview - show for all clips when hovered
-              if isRowHovered {
+              // Individual clip preview - use viewport-based logic for list view
+              if appState.shouldPlayVideoInList(url) {
                 SingleClipPreview(
                   url: url,
                   startTime: time,
@@ -106,8 +108,8 @@ struct BatchListRowView: View {
               .cornerRadius(8)
           }
 
-          // Hover preview overlay
-          if isRowHovered {
+          // Preview overlay - use viewport-based logic for list view
+          if appState.shouldPlayVideoInList(url) {
             HoverPreviewCard(
               url: url,
               times: playbackType == .clips ? times : [0.02],
@@ -171,6 +173,33 @@ struct BatchListRowView: View {
         .fill(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
     )
     .contentShape(Rectangle())
+    .background(
+      // Viewport detection using GeometryReader
+      GeometryReader { geometry in
+        Color.clear
+          .onAppear {
+            // Check if this row is visible when it first appears
+            let frame = geometry.frame(in: .global)
+            let screenBounds = NSScreen.main?.frame ?? CGRect.zero
+            let isVisible = frame.intersects(screenBounds)
+
+            if isVisible {
+              appState.videoDidBecomeVisible(url)
+            }
+          }
+          .onChange(of: geometry.frame(in: .global)) { _, frame in
+            // Check visibility when the frame changes (due to scrolling)
+            let screenBounds = NSScreen.main?.frame ?? CGRect.zero
+            let isVisible = frame.intersects(screenBounds)
+
+            if isVisible && !appState.visibleVideosInList.contains(url) {
+              appState.videoDidBecomeVisible(url)
+            } else if !isVisible && appState.visibleVideosInList.contains(url) {
+              appState.videoDidBecomeInvisible(url)
+            }
+          }
+      }
+    )
     .onHover { hovering in
       onHoverChanged(hovering)
     }
@@ -187,6 +216,16 @@ struct BatchListRowView: View {
     )
     .onTapGesture {
       isSelected.toggle()
+    }
+    .onDisappear {
+      // Clean up when row disappears
+      appState.videoDidBecomeInvisible(url)
+
+      // Cancel pending thumbnail requests when view disappears
+      for requestId in thumbnailRequestIds {
+        ThumbnailCache.shared.cancelRequest(requestId)
+      }
+      thumbnailRequestIds.removeAll()
     }
     .task {
       // Load thumbnails for each clip at their specific times
@@ -210,13 +249,6 @@ struct BatchListRowView: View {
           thumbnailRequestIds.append(requestId)
         }
       }
-    }
-    .onDisappear {
-      // Cancel pending thumbnail requests when view disappears
-      for requestId in thumbnailRequestIds {
-        ThumbnailCache.shared.cancelRequest(requestId)
-      }
-      thumbnailRequestIds.removeAll()
     }
   }
 }
@@ -390,6 +422,7 @@ struct SettingsBar: View {
   let isTextFieldDisabled: Bool
   let hotkeyFieldFocused: FocusState<Bool>.Binding
   let playbackMode: PlaybackMode
+  let preloadCount: Int
 
   let onSelectFolder: () -> Void
   let onPlaybackTypeChange: (PlaybackType) -> Void
@@ -401,6 +434,7 @@ struct SettingsBar: View {
   let onMuteToggle: () -> Void
   let onGoAction: () -> Void
   let onPlaybackModeChange: (PlaybackMode) -> Void
+  let onPreloadCountChange: (Int) -> Void
 
   var body: some View {
     HStack(spacing: 8) {
@@ -468,6 +502,19 @@ struct SettingsBar: View {
             }
             .frame(width: 80)
           }
+        }
+
+        HStack(spacing: 2) {
+          Text("Preload:").frame(width: 50, alignment: .leading)
+          Stepper(
+            value: Binding(
+              get: { preloadCount },
+              set: { onPreloadCountChange($0) }
+            ), in: 0...10
+          ) {
+            Text("\(preloadCount)")
+          }
+          .frame(width: 60)
         }
 
         HStack(spacing: 2) {

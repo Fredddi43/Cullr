@@ -7,7 +7,7 @@ import SwiftUI
 
 /// Main application content view - optimized for performance and modularity
 struct ContentView: View {
-  @StateObject private var appState = AppState()
+  @EnvironmentObject var appState: AppState
   @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
   @FocusState private var hotkeyFieldFocused: Bool
 
@@ -163,6 +163,7 @@ struct ContentView: View {
         isTextFieldDisabled: false,
         hotkeyFieldFocused: $hotkeyFieldFocused,
         playbackMode: appState.playbackMode,
+        preloadCount: appState.preloadCount,
         onSelectFolder: selectFolder,
         onPlaybackTypeChange: { appState.playbackType = $0 },
         onNumberOfClipsChange: { appState.numberOfClips = $0 },
@@ -178,7 +179,8 @@ struct ContentView: View {
             }
           }
         },
-        onPlaybackModeChange: { appState.playbackMode = $0 }
+        onPlaybackModeChange: { appState.playbackMode = $0 },
+        onPreloadCountChange: { appState.preloadCount = $0 }
       )
 
       FilterControls(
@@ -241,13 +243,13 @@ struct ContentView: View {
             url: url,
             isMuted: appState.isMuted,
             speedOption: appState.speedOption,
-            forcePlay: true
+            forcePlay: appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL)
           )
         } else {
           FolderHoverLoopPreview(
             url: url,
             isMuted: appState.isMuted,
-            forcePlay: true
+            forcePlay: appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL)
           )
         }
       }
@@ -258,6 +260,9 @@ struct ContentView: View {
           .stroke(
             appState.selectedURLs.contains(url) ? Color.accentColor : Color.clear, lineWidth: 3)
       )
+      .onHover { hovering in
+        appState.hoveredVideoURL = hovering ? url : nil
+      }
 
       VStack(alignment: .leading, spacing: 4) {
         Text(url.lastPathComponent)
@@ -337,6 +342,7 @@ struct ContentView: View {
         isTextFieldDisabled: false,
         hotkeyFieldFocused: $hotkeyFieldFocused,
         playbackMode: appState.playbackMode,
+        preloadCount: appState.preloadCount,
         onSelectFolder: selectFolder,
         onPlaybackTypeChange: { appState.playbackType = $0 },
         onNumberOfClipsChange: { appState.numberOfClips = $0 },
@@ -352,7 +358,8 @@ struct ContentView: View {
             }
           }
         },
-        onPlaybackModeChange: { appState.playbackMode = $0 }
+        onPlaybackModeChange: { appState.playbackMode = $0 },
+        onPreloadCountChange: { appState.preloadCount = $0 }
       )
 
       // Filter controls
@@ -406,7 +413,9 @@ struct ContentView: View {
               ),
               fileInfo: appState.fileManager.fileInfo[url],
               isRowHovered: appState.hoveredBatchRow == url,
+              shouldPlayVideo: appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL),
               onHoverChanged: { hovering in
+                appState.hoveredVideoURL = hovering ? url : nil
                 appState.hoveredBatchRow = hovering ? url : nil
               },
               onDoubleClick: {
@@ -489,6 +498,7 @@ struct ContentView: View {
         isTextFieldDisabled: false,
         hotkeyFieldFocused: $hotkeyFieldFocused,
         playbackMode: appState.playbackMode,
+        preloadCount: appState.preloadCount,
         onSelectFolder: selectFolder,
         onPlaybackTypeChange: { appState.playbackType = $0 },
         onNumberOfClipsChange: { appState.numberOfClips = $0 },
@@ -504,7 +514,8 @@ struct ContentView: View {
             }
           }
         },
-        onPlaybackModeChange: { appState.playbackMode = $0 }
+        onPlaybackModeChange: { appState.playbackMode = $0 },
+        onPreloadCountChange: { appState.preloadCount = $0 }
       )
 
       // Player size slider (consistent with other views)
@@ -595,6 +606,7 @@ struct ContentView: View {
         isTextFieldDisabled: false,
         hotkeyFieldFocused: $hotkeyFieldFocused,
         playbackMode: appState.playbackMode,
+        preloadCount: appState.preloadCount,
         onSelectFolder: selectFolder,
         onPlaybackTypeChange: { appState.playbackType = $0 },
         onNumberOfClipsChange: { appState.numberOfClips = $0 },
@@ -610,7 +622,8 @@ struct ContentView: View {
             }
           }
         },
-        onPlaybackModeChange: { appState.playbackMode = $0 }
+        onPlaybackModeChange: { appState.playbackMode = $0 },
+        onPreloadCountChange: { appState.preloadCount = $0 }
       )
 
       // Player size slider (consistent with other views)
@@ -708,9 +721,6 @@ struct ContentView: View {
   // MARK: - Actions
 
   private func selectFolder() {
-    let startTime = Date()
-    print("🚨 FREEZE DEBUG: selectFolder STARTED at \(startTime)")
-
     let panel = NSOpenPanel()
     panel.canChooseDirectories = true
     panel.canChooseFiles = false
@@ -718,32 +728,13 @@ struct ContentView: View {
     panel.prompt = "Select Folders"
     panel.message = "Select one or more folders to load videos from"
 
-    print("🚨 FREEZE DEBUG: About to show folder selection panel...")
     if panel.runModal() == .OK {
       let selectedURLs = panel.urls
-      print(
-        "🚨 FREEZE DEBUG: User selected \(selectedURLs.count) folders: \(selectedURLs.map { $0.lastPathComponent })"
-      )
 
       Task {
-        let taskStartTime = Date()
-        print("🚨 FREEZE DEBUG: Starting loadMultipleFolders task at \(taskStartTime)")
-
         await appState.loadMultipleFolders(selectedURLs)
-
-        let taskEndTime = Date()
-        print(
-          "🚨 FREEZE DEBUG: loadMultipleFolders task COMPLETED at \(taskEndTime), duration: \(taskEndTime.timeIntervalSince(taskStartTime))s"
-        )
       }
-    } else {
-      print("🚨 FREEZE DEBUG: User cancelled folder selection")
     }
-
-    let endTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: selectFolder COMPLETED at \(endTime), duration: \(endTime.timeIntervalSince(startTime))s"
-    )
   }
 
   private func createAlert() -> Alert {

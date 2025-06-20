@@ -16,26 +16,15 @@ class FileLoadingManager: ObservableObject {
 
   private let maxConcurrentTasks = 2  // NUCLEAR OPTION: Reduced from 8 to 2
 
-  func loadVideosAndInfo(from folderURL: URL, sortOption: SortOption, sortAscending: Bool) async
+  func loadVideosAndInfo(
+    from folderURL: URL, sortOption: SortOption, sortAscending: Bool
+  ) async
     -> [URL]
   {
-    let startTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: loadVideosAndInfo STARTED at \(startTime) for folder: \(folderURL.lastPathComponent)"
-    )
-
     do {
-      print("🚨 FREEZE DEBUG: About to load directory contents...")
-
       // FIXED: Use async file operations to prevent UI freezing
       let contents = try await withTimeout(10.0) {
-        let loadStartTime = Date()
-        print("🚨 FREEZE DEBUG: Directory loading task STARTED at \(loadStartTime)")
-
         return try await Task.detached {
-          let taskStartTime = Date()
-          print("🚨 FREEZE DEBUG: Task.detached STARTED at \(taskStartTime)")
-
           let fileManager = FileManager.default
           let result = try fileManager.contentsOfDirectory(
             at: folderURL,
@@ -44,86 +33,41 @@ class FileLoadingManager: ObservableObject {
             ]
           )
 
-          let taskEndTime = Date()
-          print(
-            "🚨 FREEZE DEBUG: Task.detached COMPLETED at \(taskEndTime), duration: \(taskEndTime.timeIntervalSince(taskStartTime))s"
-          )
-
           return result
         }.value
       }
 
-      print("🚨 FREEZE DEBUG: Directory contents loaded, \(contents.count) items found")
-
       let videos = await Task.detached {
-        let filterStartTime = Date()
-        print("🚨 FREEZE DEBUG: Video filtering STARTED at \(filterStartTime)")
-
         let fileManager = FileManager.default
         let result = contents.filter { fileManager.isVideoFile($0) }
 
-        let filterEndTime = Date()
-        print(
-          "🚨 FREEZE DEBUG: Video filtering COMPLETED at \(filterEndTime), duration: \(filterEndTime.timeIntervalSince(filterStartTime))s, found \(result.count) videos"
-        )
-
         return result
       }.value
-
-      print("🚨 FREEZE DEBUG: About to start resource value loading...")
 
       // Process files sequentially to avoid Sendable issues with URLResourceValues
       var videoResourceValues: [URL: URLResourceValues?] = [:]
 
       for (index, video) in videos.enumerated() {
-        let resourceStartTime = Date()
-        print(
-          "🚨 FREEZE DEBUG: Loading resource values for video \(index + 1)/\(videos.count): \(video.lastPathComponent) at \(resourceStartTime)"
-        )
-
         do {
           let resourceValues = try await Task.detached {
-            let detachedStartTime = Date()
-            print(
-              "🚨 FREEZE DEBUG: Resource detached task STARTED for \(video.lastPathComponent) at \(detachedStartTime)"
-            )
-
             let result = try video.resourceValues(forKeys: [
               .fileSizeKey,
               .contentModificationDateKey,
               .creationDateKey,
             ])
 
-            let detachedEndTime = Date()
-            print(
-              "🚨 FREEZE DEBUG: Resource detached task COMPLETED for \(video.lastPathComponent) at \(detachedEndTime), duration: \(detachedEndTime.timeIntervalSince(detachedStartTime))s"
-            )
-
             return result
           }.value
 
           videoResourceValues[video] = resourceValues
 
-          let resourceEndTime = Date()
-          print(
-            "🚨 FREEZE DEBUG: Resource values loaded for \(video.lastPathComponent) at \(resourceEndTime), duration: \(resourceEndTime.timeIntervalSince(resourceStartTime))s"
-          )
-
         } catch {
-          print(
-            "🚨 FREEZE DEBUG: ERROR loading resource values for \(video.lastPathComponent): \(error)"
-          )
           videoResourceValues[video] = nil
         }
       }
 
-      print("🚨 FREEZE DEBUG: About to start sorting with pre-loaded values...")
-
       // Optimized sorting with timeout and pre-loaded resource values
       let sortedVideos = try await withTimeout(10) {
-        let sortStartTime = Date()
-        print("🚨 FREEZE DEBUG: Sorting STARTED at \(sortStartTime)")
-
         let result = videos.sorted { url1, url2 in
           switch sortOption {
           case .name:
@@ -154,23 +98,11 @@ class FileLoadingManager: ObservableObject {
           }
         }
 
-        let sortEndTime = Date()
-        print(
-          "🚨 FREEZE DEBUG: Sorting COMPLETED at \(sortEndTime), duration: \(sortEndTime.timeIntervalSince(sortStartTime))s"
-        )
-
         return result
       }
 
-      let endTime = Date()
-      print(
-        "🚨 FREEZE DEBUG: loadVideosAndInfo COMPLETED at \(endTime), total duration: \(endTime.timeIntervalSince(startTime))s, returning \(sortedVideos.count) videos"
-      )
-
       return sortedVideos
     } catch {
-      let errorTime = Date()
-      print("🚨 FREEZE DEBUG: ERROR in loadVideosAndInfo at \(errorTime): \(error)")
       return []
     }
   }
@@ -279,15 +211,11 @@ class FileLoadingManager: ObservableObject {
   private func extractFileInfoWithTimeout(url: URL) async throws -> FileInfo {
     // CRITICAL FIX: Run ALL AVAsset operations in a detached task to prevent main thread blocking
     return try await Task.detached {
-      print("🚨 FREEZE DEBUG: Starting detached AVAsset operations for \(url.lastPathComponent)")
-
       let asset = AVURLAsset(url: url)
 
       // Get file attributes first (this is fast)
       let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
       let fileSize = attributes[.size] as? UInt64 ?? 0
-
-      print("🚨 FREEZE DEBUG: About to load duration for \(url.lastPathComponent)")
 
       // CRITICAL FIX: Add aggressive timeout for duration loading
       let duration: CMTime
@@ -295,12 +223,7 @@ class FileLoadingManager: ObservableObject {
         duration = try await withTimeout(1.0) {
           return try await asset.load(.duration)
         }
-        print(
-          "🚨 FREEZE DEBUG: Duration loaded for \(url.lastPathComponent), duration: \(duration.seconds)s"
-        )
       } catch {
-        print(
-          "🚨 FREEZE DEBUG: Duration loading timed out for \(url.lastPathComponent), using fallback")
         // Use a fallback duration if loading times out
         duration = CMTime.zero
       }
@@ -309,12 +232,6 @@ class FileLoadingManager: ObservableObject {
       // Just use basic file info to prevent any AVAsset track operations
       var resolution = "Unknown"
       var fps = "Unknown"
-
-      print(
-        "🚨 FREEZE DEBUG: SKIPPING track/resolution loading to prevent freeze for \(url.lastPathComponent)"
-      )
-
-      print("🚨 FREEZE DEBUG: Completed detached AVAsset operations for \(url.lastPathComponent)")
 
       return FileInfo(
         size: formatFileSize(bytes: fileSize),
@@ -365,6 +282,10 @@ class AppState: ObservableObject {
   @Published var playbackType: PlaybackType = .clips
   @Published var speedOption: SpeedOption = .x2
   @Published var isMuted: Bool = true
+  @Published var hoveredVideoURL: URL? = nil
+  @Published var preloadCount: Int = 0
+  @Published var visibleVideosInList: Set<URL> = []
+  @Published var videosToPlay: Set<URL> = []
 
   // MARK: - Sorting & Filtering
   @Published var sortOption: SortOption = .name
@@ -481,37 +402,95 @@ class AppState: ObservableObject {
     return formatFileSize(bytes: totalSize)
   }
 
+  // MARK: - Video Preloading Logic
+  func shouldPlayVideo(_ url: URL, hoveredURL: URL?) -> Bool {
+    guard let hoveredURL = hoveredURL else {
+      print("🎵 No hovered URL, not playing \(url.lastPathComponent)")
+      return false
+    }
+
+    // Always play the hovered video
+    if url == hoveredURL {
+      print("🎵 ✅ Playing hovered video: \(url.lastPathComponent)")
+      return true
+    }
+
+    // If preloadCount is 0, only play the hovered video
+    if preloadCount == 0 {
+      print("🎵 ❌ Preload is 0, not playing \(url.lastPathComponent)")
+      return false
+    }
+
+    // Find the index of the hovered video
+    guard let hoveredIndex = filteredVideoURLs.firstIndex(of: hoveredURL) else {
+      print("🎵 ❌ Hovered video not found in filtered list: \(hoveredURL.lastPathComponent)")
+      return false
+    }
+    guard let currentIndex = filteredVideoURLs.firstIndex(of: url) else {
+      print("🎵 ❌ Current video not found in filtered list: \(url.lastPathComponent)")
+      return false
+    }
+
+    // Play videos within preloadCount range of the hovered video
+    let distance = abs(currentIndex - hoveredIndex)
+    let shouldPlay = distance <= preloadCount
+
+    print(
+      "🎵 Video \(url.lastPathComponent): hoveredIndex=\(hoveredIndex), currentIndex=\(currentIndex), distance=\(distance), preloadCount=\(preloadCount), shouldPlay=\(shouldPlay)"
+    )
+
+    return shouldPlay
+  }
+
+  // MARK: - Batch List Viewport Logic
+  func shouldPlayVideoInList(_ url: URL) -> Bool {
+    let shouldPlay = videosToPlay.contains(url)
+    if shouldPlay {
+      print("🎵 📋 Playing list video: \(url.lastPathComponent)")
+    } else {
+      print("🎵 📋 Not playing list video: \(url.lastPathComponent)")
+    }
+    return shouldPlay
+  }
+
+  func videoDidBecomeVisible(_ url: URL) {
+    guard !visibleVideosInList.contains(url) else { return }
+    
+    visibleVideosInList.insert(url)
+    print("🎵 👁️ Video became visible: \(url.lastPathComponent)")
+    
+    // Start a 0.2 second timer before adding to play list
+    Task { @MainActor in
+      try? await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
+      
+      // Check if still visible after delay
+      if visibleVideosInList.contains(url) {
+        videosToPlay.insert(url)
+        print("🎵 ⏰ Video added to play list after delay: \(url.lastPathComponent)")
+      }
+    }
+  }
+
+  func videoDidBecomeInvisible(_ url: URL) {
+    visibleVideosInList.remove(url)
+    videosToPlay.remove(url)
+    print("🎵 👁️‍🗨️ Video became invisible: \(url.lastPathComponent)")
+  }
+
   // MARK: - Managers
   let fileManager = FileLoadingManager()
   let hotkeyMonitor = GlobalHotkeyMonitor()
 
   // MARK: - Actions
   func loadVideosAndThumbnails(from folderURL: URL) async {
-    let startTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: loadVideosAndThumbnails STARTED at \(startTime) for: \(folderURL.lastPathComponent)"
-    )
-
     await loadVideosAndThumbnailsWithProgress(from: folderURL)
-
-    let endTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: loadVideosAndThumbnails COMPLETED at \(endTime), duration: \(endTime.timeIntervalSince(startTime))s"
-    )
   }
 
   func loadVideosAndThumbnailsWithProgress(from folderURL: URL) async {
-    let startTime = Date()
-    print("🚨 FREEZE DEBUG: loadVideosAndThumbnailsWithProgress STARTED at \(startTime)")
-
     self.folderURL = folderURL
 
-    print("🚨 FREEZE DEBUG: Setting loading message...")
     loadingMessage = "Loading videos from \(folderURL.lastPathComponent)..."
     loadingProgress = 0.3  // Start after folder scanning
-
-    print("🚨 FREEZE DEBUG: About to call fileManager.loadVideosAndInfo...")
-    let loadStartTime = Date()
 
     let loadedURLs = await fileManager.loadVideosAndInfo(
       from: folderURL,
@@ -519,30 +498,18 @@ class AppState: ObservableObject {
       sortAscending: sortAscending
     )
 
-    let loadEndTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: fileManager.loadVideosAndInfo COMPLETED at \(loadEndTime), duration: \(loadEndTime.timeIntervalSince(loadStartTime))s, loaded \(loadedURLs.count) videos"
-    )
-
     // NUCLEAR OPTION: Check if this is a problematic folder and limit UI updates
     let folderName = folderURL.lastPathComponent
     let isProblematicFolder = loadedURLs.count == 54 || folderName.lowercased().contains("amy")
 
     if isProblematicFolder {
-      print(
-        "🚨 UI NUCLEAR OPTION: Detected problematic folder '\(folderName)' - LIMITING UI UPDATES")
-
       // Only load first 10 videos initially to prevent UI freeze
       let limitedURLs = Array(loadedURLs.prefix(10))
-      print(
-        "🚨 FREEZE DEBUG: Updating UI with limited videos (\(limitedURLs.count) of \(loadedURLs.count))..."
-      )
       videoURLs = limitedURLs
 
       // Store the full list for later gradual loading
       Task {
         try? await Task.sleep(nanoseconds: 1_000_000_000)  // Wait 1 second
-        print("🚨 UI NUCLEAR OPTION: Gradually loading remaining videos...")
 
         // Gradually add more videos in small batches
         for i in stride(from: 10, to: loadedURLs.count, by: 5) {
@@ -551,16 +518,10 @@ class AppState: ObservableObject {
             videoURLs.append(contentsOf: batch)
           }
           try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms between batches
-          print(
-            "🚨 UI NUCLEAR OPTION: Added batch, now showing \(videoURLs.count) of \(loadedURLs.count) videos"
-          )
         }
-
-        print("🚨 UI NUCLEAR OPTION: Completed gradual loading of all \(loadedURLs.count) videos")
       }
     } else {
       // Normal processing for non-problematic folders
-      print("🚨 FREEZE DEBUG: Updating UI with loaded videos...")
       videoURLs = loadedURLs
     }
 
@@ -568,47 +529,26 @@ class AppState: ObservableObject {
     selectedURLs.removeAll()
     selectionOrder.removeAll()
 
-    print("🚨 FREEZE DEBUG: Starting file info loading...")
     loadingMessage = "Loading file information..."
     loadingProgress = 0.5
 
     // Load file info with progress tracking
-    let fileInfoStartTime = Date()
     await fileManager.loadFileInfoWithProgress(for: loadedURLs) { progress, message in
-      print("🚨 FREEZE DEBUG: File info progress: \(progress), message: \(message)")
       DispatchQueue.main.async {
         self.loadingProgress = 0.5 + (progress * 0.3)  // 50% to 80%
         self.loadingMessage = message
       }
     }
 
-    let fileInfoEndTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: File info loading COMPLETED at \(fileInfoEndTime), duration: \(fileInfoEndTime.timeIntervalSince(fileInfoStartTime))s"
-    )
-
     loadingProgress = 1.0
     loadingMessage = "Complete"
-
-    let endTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: loadVideosAndThumbnailsWithProgress COMPLETED at \(endTime), total duration: \(endTime.timeIntervalSince(startTime))s"
-    )
   }
 
   // CRITICAL FIX: New function to handle sorting without reloading the folder
   func applySorting() async {
-    let startTime = Date()
-    print("🚨 FREEZE DEBUG: applySorting STARTED at \(startTime)")
-
     guard !videoURLs.isEmpty else {
-      print("🚨 FREEZE DEBUG: applySorting SKIPPED - no videos to sort")
       return
     }
-
-    print(
-      "🚨 FREEZE DEBUG: About to sort \(videoURLs.count) videos with option: \(sortOption) (ascending: \(sortAscending))"
-    )
 
     // Capture values needed for sorting
     let currentVideoURLs = videoURLs
@@ -616,14 +556,8 @@ class AppState: ObservableObject {
     let currentSortAscending = sortAscending
     let currentFileInfo = fileManager.fileInfo
 
-    print("🚨 FREEZE DEBUG: Captured values, starting detached sorting task...")
-    let sortStartTime = Date()
-
     // Sort the existing videoURLs array without reloading from disk
     let sortedURLs = await Task.detached {
-      let detachedStartTime = Date()
-      print("🚨 FREEZE DEBUG: Detached sorting task STARTED at \(detachedStartTime)")
-
       let result = currentVideoURLs.sorted { url1, url2 in
         switch currentSortOption {
         case .name:
@@ -654,26 +588,10 @@ class AppState: ObservableObject {
         }
       }
 
-      let detachedEndTime = Date()
-      print(
-        "🚨 FREEZE DEBUG: Detached sorting task COMPLETED at \(detachedEndTime), duration: \(detachedEndTime.timeIntervalSince(detachedStartTime))s"
-      )
-
       return result
     }.value
 
-    let sortEndTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: Sorting task completed at \(sortEndTime), duration: \(sortEndTime.timeIntervalSince(sortStartTime))s"
-    )
-
-    print("🚨 FREEZE DEBUG: Updating videoURLs array...")
     videoURLs = sortedURLs
-
-    let endTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: applySorting COMPLETED at \(endTime), total duration: \(endTime.timeIntervalSince(startTime))s, \(sortedURLs.count) videos sorted"
-    )
   }
 
   // Helper function to convert file size string back to bytes for sorting
@@ -696,11 +614,6 @@ class AppState: ObservableObject {
   }
 
   func loadMultipleFolders(_ selectedFolders: [URL]) async {
-    let startTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: loadMultipleFolders STARTED at \(startTime) with \(selectedFolders.count) folders"
-    )
-
     isLoadingFolders = true
     loadingProgress = 0.0
     loadingMessage = "Scanning folders..."
@@ -709,11 +622,6 @@ class AppState: ObservableObject {
 
     // Process each selected folder and its subfolders
     for (index, folderURL) in selectedFolders.enumerated() {
-      let folderStartTime = Date()
-      print(
-        "🚨 FREEZE DEBUG: Processing folder \(index + 1)/\(selectedFolders.count): \(folderURL.lastPathComponent) at \(folderStartTime)"
-      )
-
       loadingMessage =
         "Scanning folder \(index + 1) of \(selectedFolders.count): \(folderURL.lastPathComponent)"
       loadingProgress = Double(index) / Double(selectedFolders.count) * 0.3  // 30% for folder scanning
@@ -722,14 +630,8 @@ class AppState: ObservableObject {
       allFolders.append(folderURL)
 
       // Find subfolders asynchronously
-      print("🚨 FREEZE DEBUG: Looking for subfolders in \(folderURL.lastPathComponent)...")
       do {
         let subfolders = try await Task.detached {
-          let detachedStartTime = Date()
-          print(
-            "🚨 FREEZE DEBUG: Subfolder scan detached task STARTED for \(folderURL.lastPathComponent) at \(detachedStartTime)"
-          )
-
           let fileManager = FileManager.default
           let contents = try fileManager.contentsOfDirectory(
             at: folderURL,
@@ -748,27 +650,14 @@ class AppState: ObservableObject {
             $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
           }
 
-          let detachedEndTime = Date()
-          print(
-            "🚨 FREEZE DEBUG: Subfolder scan detached task COMPLETED for \(folderURL.lastPathComponent) at \(detachedEndTime), duration: \(detachedEndTime.timeIntervalSince(detachedStartTime))s, found \(subfolders.count) subfolders"
-          )
-
           return subfolders
         }.value
 
         allFolders.append(contentsOf: subfolders)
-
-        let folderEndTime = Date()
-        print(
-          "🚨 FREEZE DEBUG: Folder processing COMPLETED for \(folderURL.lastPathComponent) at \(folderEndTime), duration: \(folderEndTime.timeIntervalSince(folderStartTime))s"
-        )
-
       } catch {
-        print("🚨 FREEZE DEBUG: ERROR reading subfolders from \(folderURL): \(error)")
+        // Continue with other folders if one fails
       }
     }
-
-    print("🚨 FREEZE DEBUG: All folder scanning completed, total folders found: \(allFolders.count)")
 
     // Update folder collection
     folderCollection = allFolders
@@ -776,25 +665,10 @@ class AppState: ObservableObject {
 
     // Load the first folder with improved performance
     if let firstFolder = allFolders.first {
-      print("🚨 FREEZE DEBUG: About to load first folder: \(firstFolder.lastPathComponent)")
-      let firstFolderStartTime = Date()
-
       await loadVideosAndThumbnailsWithProgress(from: firstFolder)
-
-      let firstFolderEndTime = Date()
-      print(
-        "🚨 FREEZE DEBUG: First folder loading COMPLETED at \(firstFolderEndTime), duration: \(firstFolderEndTime.timeIntervalSince(firstFolderStartTime))s"
-      )
-    } else {
-      print("🚨 FREEZE DEBUG: No folders to load")
     }
 
     isLoadingFolders = false
-
-    let endTime = Date()
-    print(
-      "🚨 FREEZE DEBUG: loadMultipleFolders COMPLETED at \(endTime), total duration: \(endTime.timeIntervalSince(startTime))s"
-    )
   }
 
   func loadFolderWithSubfolders(from rootFolderURL: URL) async {

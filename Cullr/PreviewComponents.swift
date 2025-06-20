@@ -120,14 +120,20 @@ struct HoverPreviewCard: View {
       }
     }
     .onAppear {
-      setupPlayer()
+      if forcePlay {
+        setupPlayer()
+      }
     }
     .onDisappear {
       cleanup()
     }
     .onChange(of: forcePlay) { _, shouldPlay in
       if shouldPlay {
-        startPlayback()
+        if player == nil {
+          setupPlayer()
+        } else if isAssetReady {
+          startPlayback()
+        }
       } else {
         stopPlayback()
       }
@@ -214,10 +220,12 @@ struct FolderHoverLoopPreview: View {
   @State private var isAssetReady = false
   @State private var currentClip = 0
   @State private var timer: Timer?
-  @State private var opacity: Double = 0
+  @State private var videoOpacity: Double = 0
   @State private var duration: Double = 0
   @State private var startTimes: [Double] = []
   @State private var clipOpacity: Double = 1.0
+  @State private var thumbnail: Image?
+  @State private var thumbnailRequestId: UUID?
 
   private let clipLength: Float = 3.0
 
@@ -228,32 +236,64 @@ struct FolderHoverLoopPreview: View {
   }
 
   var body: some View {
-    Group {
-      if let player = player {
-        BaseVideoPlayerView(player: player)
-          .opacity(opacity * clipOpacity)
+    ZStack {
+      // Static thumbnail (always visible)
+      if let thumbnail = thumbnail {
+        thumbnail
+          .resizable()
+          .aspectRatio(contentMode: .fill)
+          .opacity(forcePlay && videoOpacity > 0 ? 0 : 1)
       } else {
         Rectangle()
           .fill(Color.gray.opacity(0.3))
-          .opacity(opacity)
+          .opacity(forcePlay && videoOpacity > 0 ? 0 : 1)
+      }
+
+      // Video player (only visible when playing)
+      if let player = player, forcePlay {
+        BaseVideoPlayerView(player: player)
+          .opacity(videoOpacity * clipOpacity)
       }
     }
     .onAppear {
-      setupPlayer()
+      loadThumbnail()
+      if forcePlay {
+        setupPlayer()
+      }
     }
     .onDisappear {
       cleanup()
     }
     .onChange(of: forcePlay) { _, shouldPlay in
-      if shouldPlay && isAssetReady {
-        startPlayback()
-        withAnimation(.easeIn(duration: 0.3)) {
-          opacity = 1.0
+      if shouldPlay {
+        if player == nil {
+          setupPlayer()
+        } else if isAssetReady {
+          startPlayback()
+          withAnimation(.easeIn(duration: 0.3)) {
+            videoOpacity = 1.0
+          }
         }
       } else {
         stopPlayback()
         withAnimation(.easeOut(duration: 0.2)) {
-          opacity = 0.0
+          videoOpacity = 0.0
+        }
+      }
+    }
+  }
+
+  private func loadThumbnail() {
+    let cacheKey = "thumbnail_\(url.lastPathComponent)_1.0"
+
+    if let cached = ThumbnailCache.shared.get(for: cacheKey) {
+      thumbnail = cached
+    } else {
+      thumbnailRequestId = ThumbnailCache.shared.requestThumbnail(
+        for: url, at: 1.0, priority: .normal
+      ) { image in
+        Task { @MainActor in
+          self.thumbnail = image
         }
       }
     }
@@ -275,7 +315,7 @@ struct FolderHoverLoopPreview: View {
           if forcePlay {
             startPlayback()
             withAnimation(.easeIn(duration: 0.3)) {
-              opacity = 1.0
+              videoOpacity = 1.0
             }
           }
         }
@@ -327,8 +367,13 @@ struct FolderHoverLoopPreview: View {
     stopPlayback()
     player = nil
     isAssetReady = false
-    opacity = 0
+    videoOpacity = 0
     clipOpacity = 1.0
+
+    if let requestId = thumbnailRequestId {
+      ThumbnailCache.shared.cancelRequest(requestId)
+      thumbnailRequestId = nil
+    }
   }
 }
 
@@ -342,9 +387,11 @@ struct FolderSpeedPreview: View {
 
   @State private var player: AVPlayer?
   @State private var isAssetReady = false
-  @State private var opacity: Double = 0
+  @State private var videoOpacity: Double = 0
   @State private var duration: Double = 0
   @State private var playbackObserver: NSObjectProtocol?
+  @State private var thumbnail: Image?
+  @State private var thumbnailRequestId: UUID?
 
   init(url: URL, isMuted: Bool, speedOption: SpeedOption, forcePlay: Bool) {
     self.url = url
@@ -354,38 +401,70 @@ struct FolderSpeedPreview: View {
   }
 
   var body: some View {
-    Group {
-      if let player = player {
-        BaseVideoPlayerView(player: player)
-          .opacity(opacity)
+    ZStack {
+      // Static thumbnail (always visible)
+      if let thumbnail = thumbnail {
+        thumbnail
+          .resizable()
+          .aspectRatio(contentMode: .fill)
+          .opacity(forcePlay && videoOpacity > 0 ? 0 : 1)
       } else {
         Rectangle()
           .fill(Color.gray.opacity(0.3))
-          .opacity(opacity)
+          .opacity(forcePlay && videoOpacity > 0 ? 0 : 1)
+      }
+
+      // Video player (only visible when playing)
+      if let player = player, forcePlay {
+        BaseVideoPlayerView(player: player)
+          .opacity(videoOpacity)
       }
     }
     .onAppear {
-      setupPlayer()
+      loadThumbnail()
+      if forcePlay {
+        setupPlayer()
+      }
     }
     .onDisappear {
       cleanup()
     }
     .onChange(of: forcePlay) { _, shouldPlay in
-      if shouldPlay && isAssetReady {
-        startPlayback()
-        withAnimation(.easeIn(duration: 0.3)) {
-          opacity = 1.0
+      if shouldPlay {
+        if player == nil {
+          setupPlayer()
+        } else if isAssetReady {
+          startPlayback()
+          withAnimation(.easeIn(duration: 0.3)) {
+            videoOpacity = 1.0
+          }
         }
       } else {
         stopPlayback()
         withAnimation(.easeOut(duration: 0.2)) {
-          opacity = 0.0
+          videoOpacity = 0.0
         }
       }
     }
     .onChange(of: speedOption) { _, newSpeed in
       if let player = player, isAssetReady && forcePlay {
         player.rate = Float(newSpeed.rawValue)
+      }
+    }
+  }
+
+  private func loadThumbnail() {
+    let cacheKey = "thumbnail_\(url.lastPathComponent)_1.0"
+
+    if let cached = ThumbnailCache.shared.get(for: cacheKey) {
+      thumbnail = cached
+    } else {
+      thumbnailRequestId = ThumbnailCache.shared.requestThumbnail(
+        for: url, at: 1.0, priority: .normal
+      ) { image in
+        Task { @MainActor in
+          self.thumbnail = image
+        }
       }
     }
   }
@@ -405,7 +484,7 @@ struct FolderSpeedPreview: View {
           if forcePlay {
             startPlayback()
             withAnimation(.easeIn(duration: 0.3)) {
-              opacity = 1.0
+              videoOpacity = 1.0
             }
           }
         }
@@ -448,7 +527,12 @@ struct FolderSpeedPreview: View {
     stopPlayback()
     player = nil
     isAssetReady = false
-    opacity = 0
+    videoOpacity = 0
+
+    if let requestId = thumbnailRequestId {
+      ThumbnailCache.shared.cancelRequest(requestId)
+      thumbnailRequestId = nil
+    }
   }
 }
 
