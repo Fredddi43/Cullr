@@ -33,69 +33,78 @@ struct ContentView: View {
     ZStack {
       mainContent
 
-      // Folder collection navigation bar
-      if appState.folderCollection.count > 1 {
-        FolderCollectionBottomBar(
-          folderURL: appState.folderURL,
-          currentFolderIndex: appState.currentFolderIndex,
-          folderCollectionCount: appState.folderCollection.count,
-          onPreviousFolder: {
-            appState.navigateToPreviousFolder()
-          },
-          onNextFolder: {
-            appState.navigateToNextFolder()
-          },
-          onDeleteFolder: {
-            appState.deleteCurrentFolder()
+      // CRITICAL FIX: Completely restructured overlay system to prevent overlaps
+      VStack {
+        Spacer()
+
+        // Bottom overlays container with proper spacing
+        VStack(spacing: 0) {
+          // Non-blocking progress indicator for file info (if needed)
+          if appState.fileManager.isLoading && appState.fileManager.thumbnailsToLoad > 0 {
+            HStack {
+              Spacer()
+              VStack(spacing: 8) {
+                ProgressView(
+                  value: Double(appState.fileManager.thumbnailsLoaded),
+                  total: Double(appState.fileManager.thumbnailsToLoad)
+                )
+                .frame(width: 200)
+                Text(
+                  "Loading file info: \(appState.fileManager.thumbnailsLoaded)/\(appState.fileManager.thumbnailsToLoad)"
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+              }
+              .padding()
+              .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+              .padding(.trailing)
+              .padding(.bottom, 8)
+            }
           }
-        )
+
+          // Folder collection navigation bar (at very bottom with proper safety area)
+          if appState.folderCollection.count > 1 {
+            FolderCollectionBottomBar(
+              folderURL: appState.folderURL,
+              currentFolderIndex: appState.currentFolderIndex,
+              folderCollectionCount: appState.folderCollection.count,
+              onPreviousFolder: {
+                appState.navigateToPreviousFolder()
+              },
+              onNextFolder: {
+                appState.navigateToNextFolder()
+              },
+              onDeleteFolder: {
+                appState.deleteCurrentFolder()
+              }
+            )
+            .padding(.bottom, 8)  // Safe area padding
+          }
+        }
       }
 
-      // Main loading overlay for folder loading
+      // CRITICAL FIX: Center the main loading overlay properly with higher z-index
       if appState.isLoadingFolders {
-        Color.black.opacity(0.3)
+        Color.black.opacity(0.4)
           .ignoresSafeArea()
 
         VStack(spacing: 16) {
           ProgressView(value: appState.loadingProgress)
-            .frame(width: 300)
+            .frame(width: 350)
+            .progressViewStyle(LinearProgressViewStyle(tint: .accentColor))
 
           Text(appState.loadingMessage)
             .font(.headline)
             .foregroundColor(.primary)
+            .multilineTextAlignment(.center)
 
           Text("\(Int(appState.loadingProgress * 100))% Complete")
-            .font(.caption)
+            .font(.subheadline)
             .foregroundColor(.secondary)
         }
-        .padding(24)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
-        .shadow(radius: 10)
-      }
-
-      // Non-blocking progress indicator for file info
-      else if appState.fileManager.isLoading && appState.fileManager.thumbnailsToLoad > 0 {
-        VStack {
-          Spacer()
-          HStack {
-            Spacer()
-            VStack(spacing: 8) {
-              ProgressView(
-                value: Double(appState.fileManager.thumbnailsLoaded),
-                total: Double(appState.fileManager.thumbnailsToLoad)
-              )
-              .frame(width: 200)
-              Text(
-                "Loading file info: \(appState.fileManager.thumbnailsLoaded)/\(appState.fileManager.thumbnailsToLoad)"
-              )
-              .font(.caption)
-              .foregroundColor(.secondary)
-            }
-            .padding()
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
-            .padding()
-          }
-        }
+        .padding(32)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
+        .shadow(color: .black.opacity(0.1), radius: 20, x: 0, y: 10)
       }
     }
   }
@@ -205,10 +214,11 @@ struct ContentView: View {
         folderSelectionControls
       }
 
-      // Add padding when folder collection bar is present to prevent overlay
-      if appState.folderCollection.count > 1 {
-        Spacer().frame(height: 30)
-      }
+      // CRITICAL FIX: Proper bottom spacing to prevent overlap with navigation bar
+      Spacer()
+        .frame(
+          height: appState.folderCollection.count > 1 ? 80 : 20
+        )
     }
   }
 
@@ -217,11 +227,20 @@ struct ContentView: View {
       LazyVGrid(columns: gridColumns, spacing: 16) {
         ForEach(appState.filteredVideoURLs, id: \.self) { url in
           folderVideoCard(url: url)
+            .onAppear {
+              // PERFORMANCE FIX: Only trigger hover when item actually becomes visible
+              DispatchQueue.main.async {
+                if appState.hoveredVideoURL == nil && appState.filteredVideoURLs.first == url {
+                  appState.hoveredVideoURL = url
+                }
+              }
+            }
         }
       }
       .padding(.horizontal, 16)
       .padding(.vertical, 16)
     }
+    .background(Color.clear)
   }
 
   private var gridColumns: [GridItem] {
@@ -243,13 +262,15 @@ struct ContentView: View {
             url: url,
             isMuted: appState.isMuted,
             speedOption: appState.speedOption,
-            forcePlay: appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL)
+            forcePlay: appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL),
+            thumbnail: appState.folderThumbnails[url]
           )
         } else {
           FolderHoverLoopPreview(
             url: url,
             isMuted: appState.isMuted,
-            forcePlay: appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL)
+            forcePlay: appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL),
+            thumbnail: appState.folderThumbnails[url]
           )
         }
       }
@@ -278,8 +299,13 @@ struct ContentView: View {
       }
       .frame(width: max(playerPreviewSize * 0.545, 180), alignment: .leading)
     }
+    .contentShape(Rectangle())
+    .background(
+      Rectangle()
+        .fill(appState.selectedURLs.contains(url) ? Color.accentColor.opacity(0.1) : Color.clear)
+        .cornerRadius(12)
+    )
     .onTapGesture(count: 2) {
-      print("Double-click detected on: \(url.lastPathComponent)")
       appState.openInFileManager(url: url)
     }
     .simultaneousGesture(
@@ -292,8 +318,6 @@ struct ContentView: View {
     .onTapGesture {
       appState.toggleSelection(for: url)
     }
-    .background(appState.selectedURLs.contains(url) ? Color.accentColor.opacity(0.1) : Color.clear)
-    .cornerRadius(12)
   }
 
   private var folderSelectionControls: some View {
@@ -396,13 +420,14 @@ struct ContentView: View {
       }
       .padding(.vertical, 8)
 
-      // Video list
+      // Video list - AGGRESSIVE PERFORMANCE FIX: Optimized scrolling with throttling
       ScrollView {
-        LazyVStack(spacing: 12) {
+        LazyVStack(spacing: 8) {  // Reduced spacing for better performance
           ForEach(Array(appState.filteredVideoURLs.enumerated()), id: \.element) { index, url in
             BatchListRowView(
               url: url,
-              times: getClipTimes(for: url, count: appState.numberOfClips),
+              times: appState.playbackType == .clips
+                ? getClipTimes(for: url, count: appState.numberOfClips) : [],
               staticThumbnails: [:],  // Will be loaded by the component
               isMuted: appState.isMuted,
               playbackType: appState.playbackType,
@@ -413,27 +438,34 @@ struct ContentView: View {
               ),
               fileInfo: appState.fileManager.fileInfo[url],
               isRowHovered: appState.hoveredBatchRow == url,
-              shouldPlayVideo: appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL),
               onHoverChanged: { hovering in
-                appState.hoveredVideoURL = hovering ? url : nil
-                appState.hoveredBatchRow = hovering ? url : nil
+                // PERFORMANCE FIX: Throttle hover events to prevent rapid updates
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                  if hovering {
+                    appState.hoveredVideoURL = url
+                    appState.hoveredBatchRow = url
+                  } else if appState.hoveredBatchRow == url {
+                    appState.hoveredVideoURL = nil
+                    appState.hoveredBatchRow = nil
+                  }
+                }
               },
               onDoubleClick: {
                 appState.openInFileManager(url: url)
               },
               onShiftClick: {
-                appState.selectRange(to: url)
+                appState.handleShiftClick(url: url)
               }
             )
-
-            if index < appState.filteredVideoURLs.count - 1 {
-              Divider()
-                .padding(.horizontal, 16)
-            }
+            .id(url)  // PERFORMANCE FIX: Stable ID for better list performance
+            .drawingGroup()  // PERFORMANCE FIX: Rasterize complex views for smoother scrolling
           }
         }
-        .padding(.vertical, 8)
+        .padding(.horizontal, 12)  // Reduced padding
+        .padding(.vertical, 4)  // Reduced padding
       }
+      .scrollContentBackground(.hidden)  // PERFORMANCE FIX: Remove background rendering
+      .background(Color.clear)
 
       // Bottom controls
       if !appState.selectedURLs.isEmpty {
@@ -633,48 +665,60 @@ struct ContentView: View {
       // Video clips section - all clips from current video playing side-by-side
       if appState.currentIndex < appState.videoURLs.count {
         let url = appState.videoURLs[appState.currentIndex]
-        let clipTimes = getClipTimes(for: url, count: appState.numberOfClips)
 
         VStack(spacing: 16) {
-          // Display clips in multi-row grid
-          GeometryReader { geometry in
-            let availableWidth = geometry.size.width - 32  // Account for padding
-            let clipWidth = playerPreviewSize * 0.545
-            let clipHeight = playerPreviewSize * 0.309
-            let spacing: CGFloat = 8
-            let clipsPerRow = max(1, Int((availableWidth + spacing) / (clipWidth + spacing)))
-            let rows = Array(clipTimes.enumerated()).chunked(into: clipsPerRow)
+          if appState.playbackType == .clips {
+            let clipTimes = getClipTimes(for: url, count: appState.numberOfClips)
 
-            ScrollView {
-              VStack(spacing: 8) {
-                ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, rowClips in
-                  HStack(spacing: 8) {
-                    ForEach(rowClips, id: \.offset) { index, startTime in
-                      VStack(spacing: 4) {
-                        // Individual clip player
-                        SingleClipPlayer(
-                          url: url,
-                          startTime: startTime,
-                          clipLength: appState.clipLength,
-                          isMuted: appState.isMuted
-                        )
-                        .frame(width: clipWidth, height: clipHeight)
-                        .cornerRadius(8)
+            // Display clips in multi-row grid
+            GeometryReader { geometry in
+              let availableWidth = geometry.size.width - 32  // Account for padding
+              let clipWidth = playerPreviewSize * 0.545
+              let clipHeight = playerPreviewSize * 0.309
+              let spacing: CGFloat = 8
+              let clipsPerRow = max(1, Int((availableWidth + spacing) / (clipWidth + spacing)))
+              let rows = Array(clipTimes.enumerated()).chunked(into: clipsPerRow)
 
-                        // Clip number label
-                        Text("Clip \(index + 1)")
-                          .font(.caption)
-                          .foregroundColor(.secondary)
+              ScrollView {
+                VStack(spacing: 8) {
+                  ForEach(Array(rows.enumerated()), id: \.offset) { rowIndex, rowClips in
+                    HStack(spacing: 8) {
+                      ForEach(rowClips, id: \.offset) { index, startTime in
+                        VStack(spacing: 4) {
+                          // Individual clip player
+                          SingleClipPlayer(
+                            url: url,
+                            startTime: startTime,
+                            clipLength: appState.clipLength,
+                            isMuted: appState.isMuted
+                          )
+                          .frame(width: clipWidth, height: clipHeight)
+                          .cornerRadius(8)
+
+                          // Clip number label
+                          Text("Clip \(index + 1)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        }
                       }
-                    }
 
-                    // Fill remaining space in row
-                    Spacer()
+                      // Fill remaining space in row
+                      Spacer()
+                    }
                   }
                 }
+                .padding(.horizontal)
               }
-              .padding(.horizontal)
             }
+          } else {
+            // Speed mode - show single speed player
+            SpeedPlayer(
+              url: url,
+              speedOption: $appState.speedOption,
+              isMuted: $appState.isMuted
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .aspectRatio(16 / 9, contentMode: .fit)
           }
 
           // Media info at bottom (matching folder view style)
@@ -783,7 +827,7 @@ struct ContentView: View {
           appState.fileManager.fileInfo.removeValue(forKey: url)
         }
       } catch {
-        print("Error deleting file: \(error)")
+        // Silent error handling - no console logging
       }
     }
     appState.filesPendingDeletion.removeAll()
@@ -817,7 +861,7 @@ struct ContentView: View {
         }
       }
     } catch {
-      print("Error deleting folder: \(error)")
+      // Silent error handling - no console logging
     }
 
     appState.folderPendingDeletion = nil

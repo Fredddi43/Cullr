@@ -4,8 +4,6 @@ import SwiftUI
 
 // MARK: - Video Thumbnail with Caching and Preview
 
-// MARK: - Video Thumbnail with Caching and Preview
-
 /// Video thumbnail view with hover preview functionality
 struct VideoThumbnailView: View {
   let url: URL
@@ -17,15 +15,23 @@ struct VideoThumbnailView: View {
   @State private var thumbnail: Image?
   @State private var isHovering = false
   @State private var hoverStartTime: Date?
-  @State private var thumbnailRequestId: UUID?
+  @State private var thumbnailRequestId: Int?
   @State private var isVisible = false
   @State private var loadingTask: Task<Void, Never>?
+  @State private var duration: Double = 0
 
   var body: some View {
     ZStack {
-      // NUCLEAR OPTION: Always show gray placeholder, no thumbnail generation in folder view
-      Rectangle()
-        .fill(Color.gray.opacity(0.3))
+      // CRITICAL FIX: Load thumbnails properly instead of always showing gray
+      if let thumbnail = thumbnail {
+        thumbnail
+          .resizable()
+          .aspectRatio(16 / 9, contentMode: .fill)
+      } else {
+        Rectangle()
+          .fill(Color.gray.opacity(0.3))
+          .aspectRatio(16 / 9, contentMode: .fill)
+      }
 
       // Hover preview overlay - only generate thumbnails on hover
       if isHovering {
@@ -50,15 +56,14 @@ struct VideoThumbnailView: View {
       }
     }
     .onAppear {
-      isVisible = true
-      // NUCLEAR OPTION: No thumbnail loading at all in folder view
+      loadingTask = Task {
+        await loadThumbnail()
+      }
     }
     .onDisappear {
-      isVisible = false
       loadingTask?.cancel()
       loadingTask = nil
 
-      // Cancel pending thumbnail request when view disappears
       if let requestId = thumbnailRequestId {
         ThumbnailCache.shared.cancelRequest(requestId)
         thumbnailRequestId = nil
@@ -72,8 +77,57 @@ struct VideoThumbnailView: View {
   }
 
   private func loadThumbnail() async {
-    // NUCLEAR OPTION: Disabled to prevent freezing
-    return
+    // CRITICAL FIX: Load video duration first, then generate thumbnail at 2% of duration
+    do {
+      let asset = AVURLAsset(url: url)
+      let loadedDuration = try await asset.load(.duration).seconds
+
+      await MainActor.run {
+        self.duration = loadedDuration
+      }
+
+      let thumbnailTime = max(loadedDuration * 0.02, 0.5)
+      let cacheKey = thumbnailKey(url: url, time: thumbnailTime)
+
+      if let cached = ThumbnailCache.shared.get(for: cacheKey) {
+        await MainActor.run {
+          self.thumbnail = cached
+        }
+      } else {
+        let requestId = ThumbnailCache.shared.requestThumbnail(
+          for: url, at: thumbnailTime, priority: .normal
+        ) { image in
+          Task { @MainActor in
+            self.thumbnail = image
+          }
+        }
+        thumbnailRequestId = requestId
+      }
+    } catch {
+      // Fallback to basic timing if duration loading fails
+      let fallbackTime = 0.5
+      let cacheKey = thumbnailKey(url: url, time: fallbackTime)
+
+      if let cached = ThumbnailCache.shared.get(for: cacheKey) {
+        await MainActor.run {
+          self.thumbnail = cached
+        }
+      } else {
+        let requestId = ThumbnailCache.shared.requestThumbnail(
+          for: url, at: fallbackTime, priority: .normal
+        ) { image in
+          Task { @MainActor in
+            self.thumbnail = image
+          }
+        }
+        thumbnailRequestId = requestId
+      }
+    }
+  }
+
+  // CRITICAL FIX: Use computed property for dynamic 2% timing
+  private var thumbnailTime: Double {
+    return max(duration * 0.02, 0.5)  // 2% of duration, minimum 0.5 seconds
   }
 }
 
@@ -144,27 +198,36 @@ struct HoverPreviewCard: View {
   }
 
   private func setupPlayer() {
-    let asset = AVURLAsset(url: url)
+    // PERFORMANCE FIX: Create asset with minimal configuration for speed
+    let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: false])
     let playerItem = AVPlayerItem(asset: asset)
     player = AVPlayer(playerItem: playerItem)
     player?.isMuted = isMuted
 
-    // Wait for asset to be ready
+    // PERFORMANCE FIX: Use ultra-fast asset loading with aggressive timeout
     Task {
       do {
-        let loadedDuration = try await asset.load(.duration)
+        let loadedDuration = try await withTimeout(1.0) {  // 1 second timeout for duration
+          return try await asset.load(.duration)
+        }
         await MainActor.run {
           duration = loadedDuration.seconds
-          startTimes =
-            playbackType == .clips
-            ? computeClipStartTimes(duration: duration, count: 5) : [startTime]
+          startTimes = times.isEmpty ? [max(duration * 0.02, 0.5)] : times
           isAssetReady = true
           if forcePlay {
             startPlayback()
           }
         }
       } catch {
-        // Handle error silently
+        // PERFORMANCE FIX: Fall back to basic playback on timeout
+        await MainActor.run {
+          duration = 60.0  // Assume 60 second duration if loading fails
+          startTimes = times.isEmpty ? [0.5] : times
+          isAssetReady = true
+          if forcePlay {
+            startPlayback()
+          }
+        }
       }
     }
   }
@@ -172,11 +235,21 @@ struct HoverPreviewCard: View {
   private func startPlayback() {
     guard let player = player else { return }
 
-    if playbackType == .clips && !startTimes.isEmpty {
+    // PERFORMANCE FIX: Simplified playback logic for speed
+    if startTimes.count > 1 {
+      // Multiple clips - play them in sequence
       playCurrentClip()
     } else {
-      player.play()
-      player.rate = Float(speedOption.rawValue)
+      // Single time - just play from that point at speed
+      if let startTime = startTimes.first {
+        player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
+          player.play()
+          player.rate = Float(self.speedOption.rawValue)
+        }
+      } else {
+        player.play()
+        player.rate = Float(speedOption.rawValue)
+      }
     }
   }
 
@@ -215,6 +288,7 @@ struct FolderHoverLoopPreview: View {
   let url: URL
   let isMuted: Bool
   let forcePlay: Bool
+  let thumbnail: Image?  // CRITICAL FIX: Use pre-loaded thumbnail
 
   @State private var player: AVPlayer?
   @State private var isAssetReady = false
@@ -224,15 +298,14 @@ struct FolderHoverLoopPreview: View {
   @State private var duration: Double = 0
   @State private var startTimes: [Double] = []
   @State private var clipOpacity: Double = 1.0
-  @State private var thumbnail: Image?
-  @State private var thumbnailRequestId: UUID?
 
-  private let clipLength: Float = 3.0
+  private let clipLength: Double = 3.0
 
-  init(url: URL, isMuted: Bool, forcePlay: Bool) {
+  init(url: URL, isMuted: Bool, forcePlay: Bool, thumbnail: Image? = nil) {
     self.url = url
     self.isMuted = isMuted
     self.forcePlay = forcePlay
+    self.thumbnail = thumbnail
   }
 
   var body: some View {
@@ -256,7 +329,6 @@ struct FolderHoverLoopPreview: View {
       }
     }
     .onAppear {
-      loadThumbnail()
       if forcePlay {
         setupPlayer()
       }
@@ -283,31 +355,25 @@ struct FolderHoverLoopPreview: View {
     }
   }
 
-  private func loadThumbnail() {
-    let cacheKey = "thumbnail_\(url.lastPathComponent)_1.0"
-
-    if let cached = ThumbnailCache.shared.get(for: cacheKey) {
-      thumbnail = cached
-    } else {
-      thumbnailRequestId = ThumbnailCache.shared.requestThumbnail(
-        for: url, at: 1.0, priority: .normal
-      ) { image in
-        Task { @MainActor in
-          self.thumbnail = image
-        }
-      }
-    }
-  }
-
   private func setupPlayer() {
-    let asset = AVURLAsset(url: url)
+    // PERFORMANCE FIX: Create asset with minimal configuration for ultra-fast loading
+    let asset = AVURLAsset(
+      url: url,
+      options: [
+        AVURLAssetPreferPreciseDurationAndTimingKey: false,
+        AVURLAssetReferenceRestrictionsKey: AVAssetReferenceRestrictions
+          .forbidRemoteReferenceToLocal.rawValue,
+      ])
     let playerItem = AVPlayerItem(asset: asset)
     player = AVPlayer(playerItem: playerItem)
     player?.isMuted = isMuted
 
     Task {
       do {
-        let loadedDuration = try await asset.load(.duration)
+        // PERFORMANCE FIX: Ultra-aggressive timeout for speed
+        let loadedDuration = try await withTimeout(0.8) {  // 0.8 second timeout
+          return try await asset.load(.duration)
+        }
         await MainActor.run {
           duration = loadedDuration.seconds
           startTimes = computeClipStartTimes(duration: duration, count: 5)
@@ -320,13 +386,24 @@ struct FolderHoverLoopPreview: View {
           }
         }
       } catch {
-        // Handle error silently
+        // PERFORMANCE FIX: Always provide fallback to prevent hanging
+        await MainActor.run {
+          duration = 60.0  // Default duration if loading fails
+          startTimes = computeClipStartTimes(duration: 60.0, count: 5)
+          isAssetReady = true
+          if forcePlay {
+            startPlayback()
+            withAnimation(.easeIn(duration: 0.3)) {
+              videoOpacity = 1.0
+            }
+          }
+        }
       }
     }
   }
 
   private func startPlayback() {
-    guard let player = player, !startTimes.isEmpty else { return }
+    guard player != nil, !startTimes.isEmpty else { return }
     currentClip = 0
     playClip()
   }
@@ -340,17 +417,17 @@ struct FolderHoverLoopPreview: View {
     }
 
     timer?.invalidate()
-    timer = Timer.scheduledTimer(withTimeInterval: Double(clipLength), repeats: false) { [self] _ in
-      // Simple fadeover to next clip
-      withAnimation(.easeInOut(duration: 0.3)) {
+    timer = Timer.scheduledTimer(withTimeInterval: clipLength, repeats: false) { [self] _ in
+      // PERFORMANCE FIX: Simpler fade transition to reduce overhead
+      withAnimation(.easeInOut(duration: 0.2)) {  // Shorter animation
         clipOpacity = 0.0
       }
 
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {  // Shorter delay
         currentClip = (currentClip + 1) % startTimes.count
         playClip()
 
-        withAnimation(.easeInOut(duration: 0.3)) {
+        withAnimation(.easeInOut(duration: 0.2)) {  // Shorter animation
           clipOpacity = 1.0
         }
       }
@@ -369,11 +446,6 @@ struct FolderHoverLoopPreview: View {
     isAssetReady = false
     videoOpacity = 0
     clipOpacity = 1.0
-
-    if let requestId = thumbnailRequestId {
-      ThumbnailCache.shared.cancelRequest(requestId)
-      thumbnailRequestId = nil
-    }
   }
 }
 
@@ -384,20 +456,21 @@ struct FolderSpeedPreview: View {
   let isMuted: Bool
   let speedOption: SpeedOption
   let forcePlay: Bool
+  let thumbnail: Image?  // CRITICAL FIX: Use pre-loaded thumbnail
 
   @State private var player: AVPlayer?
   @State private var isAssetReady = false
+  @State private var timer: Timer?
   @State private var videoOpacity: Double = 0
   @State private var duration: Double = 0
-  @State private var playbackObserver: NSObjectProtocol?
-  @State private var thumbnail: Image?
-  @State private var thumbnailRequestId: UUID?
 
-  init(url: URL, isMuted: Bool, speedOption: SpeedOption, forcePlay: Bool) {
+  init(url: URL, isMuted: Bool, speedOption: SpeedOption, forcePlay: Bool, thumbnail: Image? = nil)
+  {
     self.url = url
     self.isMuted = isMuted
     self.speedOption = speedOption
     self.forcePlay = forcePlay
+    self.thumbnail = thumbnail
   }
 
   var body: some View {
@@ -421,7 +494,6 @@ struct FolderSpeedPreview: View {
       }
     }
     .onAppear {
-      loadThumbnail()
       if forcePlay {
         setupPlayer()
       }
@@ -453,31 +525,25 @@ struct FolderSpeedPreview: View {
     }
   }
 
-  private func loadThumbnail() {
-    let cacheKey = "thumbnail_\(url.lastPathComponent)_1.0"
-
-    if let cached = ThumbnailCache.shared.get(for: cacheKey) {
-      thumbnail = cached
-    } else {
-      thumbnailRequestId = ThumbnailCache.shared.requestThumbnail(
-        for: url, at: 1.0, priority: .normal
-      ) { image in
-        Task { @MainActor in
-          self.thumbnail = image
-        }
-      }
-    }
-  }
-
   private func setupPlayer() {
-    let asset = AVURLAsset(url: url)
+    // PERFORMANCE FIX: Create asset with minimal configuration for maximum speed
+    let asset = AVURLAsset(
+      url: url,
+      options: [
+        AVURLAssetPreferPreciseDurationAndTimingKey: false,
+        AVURLAssetReferenceRestrictionsKey: AVAssetReferenceRestrictions
+          .forbidRemoteReferenceToLocal.rawValue,
+      ])
     let playerItem = AVPlayerItem(asset: asset)
     player = AVPlayer(playerItem: playerItem)
     player?.isMuted = isMuted
 
     Task {
       do {
-        let loadedDuration = try await asset.load(.duration)
+        // PERFORMANCE FIX: Ultra-aggressive timeout for maximum speed
+        let loadedDuration = try await withTimeout(0.8) {  // 0.8 second timeout
+          return try await asset.load(.duration)
+        }
         await MainActor.run {
           duration = loadedDuration.seconds
           isAssetReady = true
@@ -489,7 +555,17 @@ struct FolderSpeedPreview: View {
           }
         }
       } catch {
-        // Handle error silently
+        // PERFORMANCE FIX: Always provide fallback to prevent hanging
+        await MainActor.run {
+          duration = 60.0  // Default duration if loading fails
+          isAssetReady = true
+          if forcePlay {
+            startPlayback()
+            withAnimation(.easeIn(duration: 0.3)) {
+              videoOpacity = 1.0
+            }
+          }
+        }
       }
     }
   }
@@ -497,18 +573,19 @@ struct FolderSpeedPreview: View {
   private func startPlayback() {
     guard let player = player else { return }
 
-    let startTime = duration * 0.02
-    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
+    // PERFORMANCE FIX: Start from 2% of duration for speed preview
+    let startTime = max(duration * 0.02, 0.5)
+    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { _ in
       player.play()
       player.rate = Float(self.speedOption.rawValue)
     }
 
-    playbackObserver = NotificationCenter.default.addObserver(
-      forName: .AVPlayerItemDidPlayToEndTime,
-      object: player.currentItem,
-      queue: .main
-    ) { [player] _ in
-      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
+    // PERFORMANCE FIX: Simplified looping without complex observers
+    timer?.invalidate()
+    timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { _ in
+      guard let player = self.player else { return }
+      let restartTime = max(self.duration * 0.02, 0.5)
+      player.seek(to: CMTime(seconds: restartTime, preferredTimescale: 600)) { _ in
         player.play()
         player.rate = Float(self.speedOption.rawValue)
       }
@@ -517,10 +594,8 @@ struct FolderSpeedPreview: View {
 
   private func stopPlayback() {
     player?.pause()
-    if let observer = playbackObserver {
-      NotificationCenter.default.removeObserver(observer)
-      playbackObserver = nil
-    }
+    timer?.invalidate()
+    timer = nil
   }
 
   private func cleanup() {
@@ -528,11 +603,6 @@ struct FolderSpeedPreview: View {
     player = nil
     isAssetReady = false
     videoOpacity = 0
-
-    if let requestId = thumbnailRequestId {
-      ThumbnailCache.shared.cancelRequest(requestId)
-      thumbnailRequestId = nil
-    }
   }
 }
 
@@ -573,48 +643,37 @@ struct VideoClipPreview: View {
     player = AVPlayer(playerItem: playerItem)
     player?.isMuted = isMuted
 
-    Task {
-      do {
-        _ = try await asset.load(.duration)
-        await MainActor.run {
-          startClipPlayback()
-        }
-      } catch {
-        // Handle error silently
-      }
+    if !clipTimes.isEmpty {
+      playClip()
     }
   }
 
-  private func startClipPlayback() {
+  private func playClip() {
     guard let player = player, !clipTimes.isEmpty else { return }
 
-    currentClip = 0
-    playCurrentClip()
-  }
+    let clipTime = clipTimes[currentClip]
+    let seekTime = CMTime(seconds: clipTime, preferredTimescale: 600)
 
-  private func playCurrentClip() {
-    guard let player = player, !clipTimes.isEmpty else { return }
-
-    let startTime = clipTimes[currentClip]
-    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
+    player.seek(to: seekTime) { _ in
       player.play()
     }
 
     timer?.invalidate()
     timer = Timer.scheduledTimer(withTimeInterval: clipLength, repeats: false) { [self] _ in
       currentClip = (currentClip + 1) % clipTimes.count
-      playCurrentClip()
+      playClip()
     }
   }
 
-  private func stopPlayback() {
-    player?.pause()
+  private func cleanup() {
     timer?.invalidate()
     timer = nil
-  }
 
-  private func cleanup() {
-    stopPlayback()
+    if let observer = playbackObserver {
+      NotificationCenter.default.removeObserver(observer)
+      playbackObserver = nil
+    }
+
     player = nil
   }
 }
@@ -670,7 +729,9 @@ struct SpeedClipPreview: View {
     guard let player = player else { return }
 
     let startTime = duration * 0.02
-    player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
+    let startCMTime = CMTime(seconds: startTime, preferredTimescale: 600)
+
+    player.seek(to: startCMTime) { _ in
       player.rate = Float(self.speedOption.rawValue)
       player.play()
     }
@@ -679,8 +740,11 @@ struct SpeedClipPreview: View {
       forName: .AVPlayerItemDidPlayToEndTime,
       object: player.currentItem,
       queue: .main
-    ) { [player] _ in
-      player.seek(to: CMTime(seconds: startTime, preferredTimescale: 600)) { [player] _ in
+    ) { _ in
+      let loopStartTime = self.duration * 0.02
+      let loopCMTime = CMTime(seconds: loopStartTime, preferredTimescale: 600)
+
+      player.seek(to: loopCMTime) { _ in
         player.rate = Float(self.speedOption.rawValue)
         player.play()
       }
@@ -790,7 +854,7 @@ struct SingleClipPreview: View {
 /// Generate a static thumbnail for video file (legacy support)
 func generateStaticThumbnail(for url: URL) async -> Image? {
   return await withCheckedContinuation { continuation in
-    ThumbnailCache.shared.requestThumbnail(for: url, at: 1.0) { image in
+    _ = ThumbnailCache.shared.requestThumbnail(for: url, at: 1.0, priority: .normal) { image in
       continuation.resume(returning: image)
     }
   }
@@ -799,7 +863,8 @@ func generateStaticThumbnail(for url: URL) async -> Image? {
 /// Generate a static thumbnail for video file at a specific time (legacy support)
 func generateStaticThumbnailAtTime(for url: URL, at timeInSeconds: Double) async -> Image? {
   return await withCheckedContinuation { continuation in
-    ThumbnailCache.shared.requestThumbnail(for: url, at: timeInSeconds) { image in
+    _ = ThumbnailCache.shared.requestThumbnail(for: url, at: timeInSeconds, priority: .normal) {
+      image in
       continuation.resume(returning: image)
     }
   }

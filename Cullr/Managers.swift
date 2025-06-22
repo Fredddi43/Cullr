@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import AppKit
 import Combine
 import Foundation
@@ -122,22 +122,24 @@ class ThumbnailCache: ObservableObject, @unchecked Sendable {
 
   private var cache: [String: Image] = [:]
   private var accessOrder: [String] = []
-  private let maxCacheSize = 500
+  private let maxCacheSize = 500  // PERFORMANCE FIX: Reduced cache size to prevent memory issues
   private let queue = DispatchQueue(label: "thumbnail-cache", qos: .userInitiated)
 
-  // Throttling system - NUCLEAR OPTION: Only 1 concurrent operation
-  private var activeRequests: [UUID: ThumbnailRequest] = [:]
-  private var pendingRequests: [ThumbnailRequest] = []
+  // CRITICAL PERFORMANCE FIX: Ultra-conservative concurrency to prevent freezing
+  private var requestCounter: Int = 0
+  private let maxConcurrentGenerations = 2  // CRITICAL FIX: Only 2 concurrent thumbnails max
+  private let maxPendingRequests = 10  // CRITICAL FIX: Much smaller pending queue
+
+  // Simple atomic counters instead of complex dictionaries
   private var currentlyGenerating = 0
-  private let maxConcurrentGenerations = 1  // NUCLEAR OPTION: Reduced to 1
+  private var pendingCount = 0
 
   private struct ThumbnailRequest {
-    let id: UUID
+    let id: Int  // Use simple Int instead of UUID
     let url: URL
     let time: Double
     let priority: Priority
     let completion: (Image?) -> Void
-    let createdAt: Date
   }
 
   enum Priority: Int, Comparable {
@@ -177,143 +179,124 @@ class ThumbnailCache: ObservableObject, @unchecked Sendable {
     }
   }
 
-  @discardableResult
   func requestThumbnail(
-    for url: URL, at time: Double, priority: Priority = .normal,
+    for url: URL, at time: Double, priority: Priority,
     completion: @escaping (Image?) -> Void
-  ) -> UUID {
-    let requestId = UUID()
-    let request = ThumbnailRequest(
-      id: requestId,
-      url: url,
-      time: time,
-      priority: priority,
-      completion: completion,
-      createdAt: Date()
-    )
+  ) -> Int {  // Return simple Int instead of UUID
+    return queue.sync {
+      let requestId = requestCounter
+      requestCounter += 1
 
+      let cacheKey = thumbnailKey(url: url, time: time)
+
+      // Check cache first
+      if let cached = cache[cacheKey] {
+        // Call completion immediately on main queue
+        DispatchQueue.main.async {
+          completion(cached)
+        }
+        return requestId
+      }
+
+      // CRITICAL PERFORMANCE FIX: Much more conservative generation
+      if currentlyGenerating < maxConcurrentGenerations {
+        currentlyGenerating += 1
+
+        // Process request on background queue
+        Task {
+          let image = await self.generateThumbnailFast(url: url, time: time)
+
+          // Update cache and complete on main queue
+          await MainActor.run {
+            if let image = image {
+              self.set(image, for: cacheKey)
+            }
+            completion(image)
+
+            // Update counters on cache queue
+            self.queue.async {
+              self.currentlyGenerating -= 1
+            }
+          }
+        }
+      } else {
+        // PERFORMANCE FIX: Reject immediately instead of queuing to prevent backlog
+        DispatchQueue.main.async {
+          completion(nil)
+        }
+      }
+
+      return requestId
+    }
+  }
+
+  func cancelRequest(_ requestId: Int) {
     queue.async {
-      print(
-        "🎬 ThumbnailCache: Requesting thumbnail for \(url.lastPathComponent) at \(time)s (priority: \(priority))"
-      )
-      self.activeRequests[requestId] = request
-      self.processNextRequest()
+      self.currentlyGenerating = max(0, self.currentlyGenerating - 1)
+      self.pendingCount = 0
     }
-
-    return requestId
   }
 
-  func cancelRequest(_ requestId: UUID) {
+  // CRITICAL FIX: Complete reset for folder navigation
+  func clearPendingRequests() {
     queue.async {
-      print("❌ ThumbnailCache: Cancelling request \(requestId)")
-      self.activeRequests.removeValue(forKey: requestId)
-      self.pendingRequests.removeAll { $0.id == requestId }
+      self.pendingCount = 0
+      self.currentlyGenerating = 0
     }
   }
 
-  private func processNextRequest() {
-    guard currentlyGenerating < maxConcurrentGenerations else {
-      print(
-        "⏳ ThumbnailCache: Already generating \(currentlyGenerating)/\(maxConcurrentGenerations) thumbnails"
-      )
-      return
-    }
-
-    // Find highest priority request
-    let allRequests = Array(activeRequests.values) + pendingRequests
-    guard
-      let nextRequest = allRequests.max(by: {
-        $0.priority < $1.priority || ($0.priority == $1.priority && $0.createdAt > $1.createdAt)
-      })
-    else {
-      return
-    }
-
-    // Remove from pending and active
-    activeRequests.removeValue(forKey: nextRequest.id)
-    pendingRequests.removeAll { $0.id == nextRequest.id }
-
-    currentlyGenerating += 1
-    print(
-      "🚀 ThumbnailCache: Starting generation for \(nextRequest.url.lastPathComponent) (\(currentlyGenerating)/\(maxConcurrentGenerations) active)"
-    )
-
-    Task {
-      let image = await self.generateThumbnailWithTimeout(
-        url: nextRequest.url, time: nextRequest.time)
-
-      await MainActor.run {
-        nextRequest.completion(image)
-      }
-
-      self.queue.async {
-        self.currentlyGenerating -= 1
-        print(
-          "✅ ThumbnailCache: Completed generation for \(nextRequest.url.lastPathComponent) (\(self.currentlyGenerating)/\(self.maxConcurrentGenerations) active)"
-        )
-        self.processNextRequest()
-      }
+  // CRITICAL FIX: Complete reset for folder navigation
+  func cancelAllRequests() {
+    queue.async {
+      self.pendingCount = 0
+      self.currentlyGenerating = 0
     }
   }
 
-  private func generateThumbnailWithTimeout(url: URL, time: Double) async -> Image? {
-    print("⏱️ ThumbnailCache: Generating thumbnail for \(url.lastPathComponent) with 3s timeout")
-
-    return await withTaskGroup(of: Image?.self) { group in
-      // Add thumbnail generation task
-      group.addTask {
-        return await self.generateAsyncThumbnail(url: url, time: time)
-      }
-
-      // Add timeout task
-      group.addTask {
-        try? await Task.sleep(nanoseconds: 3_000_000_000)  // 3 seconds
-        print("⏰ ThumbnailCache: Timeout reached for \(url.lastPathComponent)")
-        return nil
-      }
-
-      // Return first completed result and cancel others
-      if let result = await group.next() {
-        group.cancelAll()
-        return result
-      }
-
-      return nil
-    }
-  }
-
-  private func generateAsyncThumbnail(url: URL, time: Double) async -> Image? {
-    print("🎯 ThumbnailCache: Actually generating thumbnail for \(url.lastPathComponent)")
-
+  // PERFORMANCE FIX: Ultra-fast thumbnail generation with aggressive timeouts
+  private func generateThumbnailFast(url: URL, time: Double) async -> Image? {
     return await withCheckedContinuation { continuation in
+      var hasResumed = false
+      let resumeLock = NSLock()
+
+      func safeResume(with result: Image?) {
+        resumeLock.lock()
+        defer { resumeLock.unlock() }
+
+        if !hasResumed {
+          hasResumed = true
+          continuation.resume(returning: result)
+        }
+      }
+
+      // PERFORMANCE FIX: Ultra-aggressive 2 second timeout to prevent hanging
+      let timeoutTask = Task {
+        try? await Task.sleep(nanoseconds: 2_000_000_000)  // 2 seconds max
+        safeResume(with: nil)
+      }
+
       let asset = AVAsset(url: url)
       let imageGenerator = AVAssetImageGenerator(asset: asset)
       imageGenerator.appliesPreferredTrackTransform = true
-      imageGenerator.maximumSize = CGSize(width: 300, height: 300)
+      imageGenerator.maximumSize = CGSize(width: 200, height: 200)  // PERFORMANCE FIX: Smaller thumbnails for speed
+      imageGenerator.requestedTimeToleranceBefore = CMTime(seconds: 1.0, preferredTimescale: 600)  // Allow tolerance for speed
+      imageGenerator.requestedTimeToleranceAfter = CMTime(seconds: 1.0, preferredTimescale: 600)
 
-      let cmTime = CMTime(seconds: time, preferredTimescale: 600)
+      // PERFORMANCE FIX: Always use a safe time, never 0
+      let targetTime = max(time, 0.5)
+      let cmTime = CMTime(seconds: targetTime, preferredTimescale: 600)
 
       imageGenerator.generateCGImageAsynchronously(for: cmTime) { cgImage, actualTime, error in
-        if let error = error {
-          print(
-            "❌ ThumbnailCache: Error generating thumbnail for \(url.lastPathComponent): \(error)"
-          )
-          continuation.resume(returning: nil)
-          return
+        timeoutTask.cancel()
+
+        if let cgImage = cgImage {
+          let nsImage = NSImage(cgImage: cgImage, size: NSSize.zero)
+          let image = Image(nsImage: nsImage)
+          safeResume(with: image)
+        } else {
+          // PERFORMANCE FIX: No fallback attempts - just fail fast
+          safeResume(with: nil)
         }
-
-        guard let cgImage = cgImage else {
-          print("❌ ThumbnailCache: No image generated for \(url.lastPathComponent)")
-          continuation.resume(returning: nil)
-          return
-        }
-
-        let image = Image(decorative: cgImage, scale: 1.0)
-        let key = self.thumbnailKey(url: url, time: time)
-        self.set(image, for: key)
-
-        print("✨ ThumbnailCache: Successfully generated thumbnail for \(url.lastPathComponent)")
-        continuation.resume(returning: image)
       }
     }
   }

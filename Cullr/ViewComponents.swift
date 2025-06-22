@@ -15,196 +15,29 @@ struct BatchListRowView: View {
   @Binding var isSelected: Bool
   let fileInfo: FileInfo?
   let isRowHovered: Bool
-  let shouldPlayVideo: Bool
   let onHoverChanged: (Bool) -> Void
   let onDoubleClick: () -> Void
   let onShiftClick: () -> Void
 
   @State private var clipThumbnails: [Int: Image] = [:]
-  @State private var thumbnailRequestIds: [UUID] = []
+  @State private var thumbnailRequestIds: [Int] = []
   @AppStorage("playerPreviewSize") private var playerPreviewSize: Double = 220
   @EnvironmentObject private var appState: AppState
 
   var body: some View {
     HStack(spacing: 12) {
-      // Video preview section
-      if playbackType == .clips && times.count > 1 {
-        // Show clips side-by-side when in clips mode
-        let clipWidth = playerPreviewSize * 0.545  // Same size as folder view
-        let clipHeight = playerPreviewSize * 0.309  // Same size as folder view
-
-        HStack(spacing: 2) {
-          ForEach(Array(times.enumerated()), id: \.offset) { index, time in
-            ZStack {
-              // Background thumbnail - unique for each clip
-              if let thumbnail = clipThumbnails[index] {
-                thumbnail
-                  .resizable()
-                  .aspectRatio(16 / 9, contentMode: .fill)
-                  .frame(width: clipWidth, height: clipHeight)
-                  .clipped()
-                  .cornerRadius(6)
-              } else {
-                Rectangle()
-                  .fill(Color.gray.opacity(0.3))
-                  .frame(width: clipWidth, height: clipHeight)
-                  .cornerRadius(6)
-              }
-
-              // Individual clip preview - use viewport-based logic for list view
-              if appState.shouldPlayVideoInList(url) {
-                SingleClipPreview(
-                  url: url,
-                  startTime: time,
-                  isMuted: isMuted
-                )
-                .frame(width: clipWidth, height: clipHeight)
-                .cornerRadius(6)
-              }
-
-              // Clip number overlay
-              VStack {
-                Spacer()
-                HStack {
-                  Spacer()
-                  Text("\(index + 1)")
-                    .font(.caption2)
-                    .fontWeight(.bold)
-                    .foregroundColor(.white)
-                    .padding(2)
-                    .background(Color.black.opacity(0.6))
-                    .cornerRadius(3)
-                    .padding(4)
-                }
-              }
-            }
-            .overlay(
-              RoundedRectangle(cornerRadius: 6)
-                .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
-            )
-          }
-        }
-        .frame(
-          width: clipWidth * CGFloat(times.count) + CGFloat((times.count - 1) * 2),
-          height: clipHeight)  // Dynamic width based on actual clip count
-      } else {
-        // Single preview for speed mode or single clip
-        let singleWidth = playerPreviewSize * 0.545
-        let singleHeight = playerPreviewSize * 0.309
-
-        ZStack {
-          // Background thumbnail
-          if let thumbnail = clipThumbnails[0] {
-            thumbnail
-              .resizable()
-              .aspectRatio(contentMode: .fill)
-              .frame(width: singleWidth, height: singleHeight)
-              .clipped()
-              .cornerRadius(8)
-          } else {
-            Rectangle()
-              .fill(Color.gray.opacity(0.3))
-              .frame(width: singleWidth, height: singleHeight)
-              .cornerRadius(8)
-          }
-
-          // Preview overlay - use viewport-based logic for list view
-          if appState.shouldPlayVideoInList(url) {
-            HoverPreviewCard(
-              url: url,
-              times: playbackType == .clips ? times : [0.02],
-              isMuted: isMuted,
-              playbackType: playbackType,
-              speedOption: speedOption,
-              forcePlay: true
-            )
-            .frame(width: singleWidth, height: singleHeight)
-            .cornerRadius(8)
-          }
-        }
-        .overlay(
-          RoundedRectangle(cornerRadius: 8)
-            .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
-        )
-      }
-
-      // File info section
-      VStack(alignment: .leading, spacing: 4) {
-        Text(url.lastPathComponent)
-          .lineLimit(2)
-          .truncationMode(.middle)
-          .font(.system(size: 13, weight: .medium))
-          .foregroundColor(.primary)
-
-        if let info = fileInfo {
-          HStack(spacing: 8) {
-            Text(info.size)
-              .font(.caption)
-              .foregroundColor(.secondary)
-
-            Text("•")
-              .font(.caption)
-              .foregroundColor(.secondary)
-
-            Text(info.duration)
-              .font(.caption)
-              .foregroundColor(.secondary)
-
-            if info.resolution != "Unknown" {
-              Text("•")
-                .font(.caption)
-                .foregroundColor(.secondary)
-
-              Text(info.resolution)
-                .font(.caption)
-                .foregroundColor(.secondary)
-            }
-          }
-        }
-      }
-      .frame(maxWidth: .infinity, alignment: .leading)
-
+      previewSection
+      fileInfoSection
       Spacer()
     }
     .padding(.horizontal, 16)
     .padding(.vertical, 12)
-    .background(
-      RoundedRectangle(cornerRadius: 8)
-        .fill(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
-    )
+    .background(backgroundView)
     .contentShape(Rectangle())
-    .background(
-      // Viewport detection using GeometryReader
-      GeometryReader { geometry in
-        Color.clear
-          .onAppear {
-            // Check if this row is visible when it first appears
-            let frame = geometry.frame(in: .global)
-            let screenBounds = NSScreen.main?.frame ?? CGRect.zero
-            let isVisible = frame.intersects(screenBounds)
-
-            if isVisible {
-              appState.videoDidBecomeVisible(url)
-            }
-          }
-          .onChange(of: geometry.frame(in: .global)) { _, frame in
-            // Check visibility when the frame changes (due to scrolling)
-            let screenBounds = NSScreen.main?.frame ?? CGRect.zero
-            let isVisible = frame.intersects(screenBounds)
-
-            if isVisible && !appState.visibleVideosInList.contains(url) {
-              appState.videoDidBecomeVisible(url)
-            } else if !isVisible && appState.visibleVideosInList.contains(url) {
-              appState.videoDidBecomeInvisible(url)
-            }
-          }
-      }
-    )
     .onHover { hovering in
       onHoverChanged(hovering)
     }
     .onTapGesture(count: 2) {
-      print("Double-click detected on batch row: \(url.lastPathComponent)")
       onDoubleClick()
     }
     .simultaneousGesture(
@@ -217,39 +50,223 @@ struct BatchListRowView: View {
     .onTapGesture {
       isSelected.toggle()
     }
-    .onDisappear {
-      // Clean up when row disappears
-      appState.videoDidBecomeInvisible(url)
-
-      // Cancel pending thumbnail requests when view disappears
-      for requestId in thumbnailRequestIds {
-        ThumbnailCache.shared.cancelRequest(requestId)
-      }
-      thumbnailRequestIds.removeAll()
+    .onAppear {
+      // SIMPLIFIED FIX: ONLY use pre-loaded thumbnails from AppState
+      // Don't generate thumbnails in ViewComponents - let AppState handle it
+      loadPreloadedThumbnails()
     }
-    .task {
-      // Load thumbnails for each clip at their specific times
-      for (index, time) in times.enumerated() {
-        // Skip if already loaded
-        guard clipThumbnails[index] == nil else { continue }
+    .onChange(of: appState.folderThumbnails) { _, _ in
+      // Update when new thumbnails arrive
+      loadPreloadedThumbnails()
+    }
+  }
 
-        let cacheKey = thumbnailKey(url: url, time: time)
+  @ViewBuilder
+  private var previewSection: some View {
+    if playbackType == .clips && times.count > 1 {
+      clipsPreviewView
+    } else {
+      singlePreviewView
+    }
+  }
 
-        if let cached = ThumbnailCache.shared.get(for: cacheKey) {
-          clipThumbnails[index] = cached
+  @ViewBuilder
+  private var clipsPreviewView: some View {
+    let clipWidth = playerPreviewSize * 0.545
+    let clipHeight = playerPreviewSize * 0.309
+
+    HStack(spacing: 2) {
+      ForEach(Array(times.enumerated()), id: \.offset) { index, time in
+        clipThumbnailView(index: index, width: clipWidth, height: clipHeight)
+      }
+    }
+    .frame(
+      width: clipWidth * CGFloat(times.count) + CGFloat((times.count - 1) * 2),
+      height: clipHeight)
+  }
+
+  @ViewBuilder
+  private var singlePreviewView: some View {
+    let singleWidth = playerPreviewSize * 0.545
+    let singleHeight = playerPreviewSize * 0.309
+
+    ZStack {
+      // CRITICAL FIX: Use static thumbnail by default, only show video player when actually hovered
+      if let thumbnail = clipThumbnails[0] {
+        thumbnail
+          .resizable()
+          .aspectRatio(16 / 9, contentMode: .fill)
+          .frame(width: singleWidth, height: singleHeight)
+          .clipped()
+          .cornerRadius(8)
+      } else {
+        Rectangle()
+          .fill(Color.gray.opacity(0.3))
+          .aspectRatio(16 / 9, contentMode: .fill)
+          .frame(width: singleWidth, height: singleHeight)
+          .cornerRadius(8)
+      }
+
+      // PERFORMANCE FIX: Only show video player when this specific row is hovered AND there's no other video playing
+      if isRowHovered && appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL)
+        && appState.hoveredVideoURL == url
+      {
+        if playbackType == .speed {
+          FolderSpeedPreview(
+            url: url,
+            isMuted: isMuted,
+            speedOption: speedOption,
+            forcePlay: true,
+            thumbnail: clipThumbnails[0]
+          )
+          .frame(width: singleWidth, height: singleHeight)
+          .clipped()
+          .cornerRadius(8)
         } else {
-          // Use throttled thumbnail generation with normal priority for batch thumbnails
-          let requestId = ThumbnailCache.shared.requestThumbnail(
-            for: url, at: time, priority: .normal
-          ) { image in
-            Task { @MainActor in
-              self.clipThumbnails[index] = image
-            }
-          }
-          thumbnailRequestIds.append(requestId)
+          FolderHoverLoopPreview(
+            url: url,
+            isMuted: isMuted,
+            forcePlay: true,
+            thumbnail: clipThumbnails[0]
+          )
+          .frame(width: singleWidth, height: singleHeight)
+          .clipped()
+          .cornerRadius(8)
         }
       }
     }
+    .overlay(
+      RoundedRectangle(cornerRadius: 8)
+        .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
+    )
+  }
+
+  @ViewBuilder
+  private func clipThumbnailView(index: Int, width: CGFloat, height: CGFloat) -> some View {
+    ZStack {
+      // CRITICAL FIX: Use static thumbnail by default, only show video player when actually hovered
+      if let thumbnail = clipThumbnails[index] {
+        thumbnail
+          .resizable()
+          .aspectRatio(16 / 9, contentMode: .fill)
+          .frame(width: width, height: height)
+          .clipped()
+          .cornerRadius(6)
+      } else {
+        Rectangle()
+          .fill(Color.gray.opacity(0.3))
+          .aspectRatio(16 / 9, contentMode: .fill)
+          .frame(width: width, height: height)
+          .cornerRadius(6)
+      }
+
+      // PERFORMANCE FIX: Only show video player when this specific row is hovered AND there's no other video playing
+      if isRowHovered && appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL)
+        && appState.hoveredVideoURL == url
+      {
+        if playbackType == .speed {
+          FolderSpeedPreview(
+            url: url,
+            isMuted: isMuted,
+            speedOption: speedOption,
+            forcePlay: true,
+            thumbnail: clipThumbnails[index]
+          )
+          .frame(width: width, height: height)
+          .clipped()
+          .cornerRadius(6)
+        } else {
+          FolderHoverLoopPreview(
+            url: url,
+            isMuted: isMuted,
+            forcePlay: true,
+            thumbnail: clipThumbnails[index]
+          )
+          .frame(width: width, height: height)
+          .clipped()
+          .cornerRadius(6)
+        }
+      }
+
+      VStack {
+        Spacer()
+        HStack {
+          Spacer()
+          Text("\(index + 1)")
+            .font(.caption2)
+            .fontWeight(.bold)
+            .foregroundColor(.white)
+            .padding(2)
+            .background(Color.black.opacity(0.6))
+            .cornerRadius(3)
+            .padding(4)
+        }
+      }
+    }
+    .overlay(
+      RoundedRectangle(cornerRadius: 6)
+        .stroke(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
+    )
+  }
+
+  @ViewBuilder
+  private var fileInfoSection: some View {
+    VStack(alignment: .leading, spacing: 4) {
+      Text(url.lastPathComponent)
+        .lineLimit(2)
+        .truncationMode(.middle)
+        .font(.system(size: 13, weight: .medium))
+        .foregroundColor(.primary)
+
+      if let info = fileInfo {
+        HStack(spacing: 8) {
+          Text(info.size)
+            .font(.caption)
+            .foregroundColor(.secondary)
+
+          Text("•")
+            .font(.caption)
+            .foregroundColor(.secondary)
+
+          Text(info.duration)
+            .font(.caption)
+            .foregroundColor(.secondary)
+
+          if info.resolution != "Unknown" {
+            Text("•")
+              .font(.caption)
+              .foregroundColor(.secondary)
+
+            Text(info.resolution)
+              .font(.caption)
+              .foregroundColor(.secondary)
+          }
+        }
+      }
+    }
+    .frame(maxWidth: .infinity, alignment: .leading)
+  }
+
+  @ViewBuilder
+  private var backgroundView: some View {
+    RoundedRectangle(cornerRadius: 8)
+      .fill(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
+  }
+
+  private func loadPreloadedThumbnails() {
+    // SIMPLIFIED FIX: ONLY use pre-loaded thumbnails from AppState
+    // Don't generate thumbnails in ViewComponents - let AppState handle it
+    if let thumbnail = appState.folderThumbnails[url] {
+      // For all clips, use the same thumbnail (since they're from the same video)
+      for index in 0..<times.count {
+        clipThumbnails[index] = thumbnail
+      }
+      // Also set for single preview (index 0)
+      if times.isEmpty {
+        clipThumbnails[0] = thumbnail
+      }
+    }
+    // If no thumbnail available, just leave it as nil - AppState will populate it eventually
   }
 }
 
