@@ -125,10 +125,10 @@ class ThumbnailCache: ObservableObject, @unchecked Sendable {
   private let maxCacheSize = 500  // PERFORMANCE FIX: Reduced cache size to prevent memory issues
   private let queue = DispatchQueue(label: "thumbnail-cache", qos: .userInitiated)
 
-  // CRITICAL PERFORMANCE FIX: Ultra-conservative concurrency to prevent freezing
+  // THUMBNAIL FIX: More reasonable concurrency limits for better thumbnail success rate
   private var requestCounter: Int = 0
-  private let maxConcurrentGenerations = 2  // CRITICAL FIX: Only 2 concurrent thumbnails max
-  private let maxPendingRequests = 10  // CRITICAL FIX: Much smaller pending queue
+  private let maxConcurrentGenerations = 6  // INCREASED: Allow more concurrent generations
+  private let maxPendingRequests = 20  // INCREASED: Larger pending queue
 
   // Simple atomic counters instead of complex dictionaries
   private var currentlyGenerating = 0
@@ -198,13 +198,13 @@ class ThumbnailCache: ObservableObject, @unchecked Sendable {
         return requestId
       }
 
-      // CRITICAL PERFORMANCE FIX: Much more conservative generation
+      // THUMBNAIL FIX: More aggressive generation with fallback retries
       if currentlyGenerating < maxConcurrentGenerations {
         currentlyGenerating += 1
 
-        // Process request on background queue
+        // Process request on background queue with retry logic
         Task {
-          let image = await self.generateThumbnailFast(url: url, time: time)
+          let image = await self.generateThumbnailWithRetry(url: url, time: time)
 
           // Update cache and complete on main queue
           await MainActor.run {
@@ -216,11 +216,24 @@ class ThumbnailCache: ObservableObject, @unchecked Sendable {
             // Update counters on cache queue
             self.queue.async {
               self.currentlyGenerating -= 1
+              if self.pendingCount > 0 {
+                self.pendingCount -= 1
+              }
             }
           }
         }
+      } else if pendingCount < maxPendingRequests {
+        // THUMBNAIL FIX: Queue request instead of rejecting immediately
+        pendingCount += 1
+
+        // Retry after a short delay
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+          let retryId = self.requestThumbnail(
+            for: url, at: time, priority: priority, completion: completion)
+          // Don't return the retry ID, use original
+        }
       } else {
-        // PERFORMANCE FIX: Reject immediately instead of queuing to prevent backlog
+        // Only reject if both concurrent and pending limits are exceeded
         DispatchQueue.main.async {
           completion(nil)
         }
@@ -253,7 +266,19 @@ class ThumbnailCache: ObservableObject, @unchecked Sendable {
     }
   }
 
-  // PERFORMANCE FIX: Ultra-fast thumbnail generation with aggressive timeouts
+  // SIMPLE FIX: Basic thumbnail generation with one retry
+  private func generateThumbnailWithRetry(url: URL, time: Double) async -> Image? {
+    // Try primary generation first
+    if let image = await generateThumbnailFast(url: url, time: time) {
+      return image
+    }
+
+    // Single retry with different time if original failed
+    let fallbackTime = time > 1.0 ? 1.0 : 2.0  // Try different time position
+    return await generateThumbnailFast(url: url, time: fallbackTime)
+  }
+
+  // THUMBNAIL FIX: Fast thumbnail generation with reasonable timeouts
   private func generateThumbnailFast(url: URL, time: Double) async -> Image? {
     return await withCheckedContinuation { continuation in
       var hasResumed = false
@@ -269,21 +294,21 @@ class ThumbnailCache: ObservableObject, @unchecked Sendable {
         }
       }
 
-      // PERFORMANCE FIX: Ultra-aggressive 2 second timeout to prevent hanging
+      // THUMBNAIL FIX: More reasonable 4 second timeout for better success rate
       let timeoutTask = Task {
-        try? await Task.sleep(nanoseconds: 2_000_000_000)  // 2 seconds max
+        try? await Task.sleep(nanoseconds: 4_000_000_000)  // 4 seconds max - increased for better success
         safeResume(with: nil)
       }
 
       let asset = AVAsset(url: url)
       let imageGenerator = AVAssetImageGenerator(asset: asset)
       imageGenerator.appliesPreferredTrackTransform = true
-      imageGenerator.maximumSize = CGSize(width: 200, height: 200)  // PERFORMANCE FIX: Smaller thumbnails for speed
-      imageGenerator.requestedTimeToleranceBefore = CMTime(seconds: 1.0, preferredTimescale: 600)  // Allow tolerance for speed
-      imageGenerator.requestedTimeToleranceAfter = CMTime(seconds: 1.0, preferredTimescale: 600)
+      imageGenerator.maximumSize = CGSize(width: 300, height: 300)  // THUMBNAIL FIX: Larger thumbnails for better quality
+      imageGenerator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)  // THUMBNAIL FIX: Tighter tolerance for accuracy
+      imageGenerator.requestedTimeToleranceAfter = CMTime(seconds: 0.5, preferredTimescale: 600)
 
-      // PERFORMANCE FIX: Always use a safe time, never 0
-      let targetTime = max(time, 0.5)
+      // THUMBNAIL FIX: Better time selection logic
+      let targetTime = max(time, 0.1)  // Reduced minimum time for better frame selection
       let cmTime = CMTime(seconds: targetTime, preferredTimescale: 600)
 
       imageGenerator.generateCGImageAsynchronously(for: cmTime) { cgImage, actualTime, error in

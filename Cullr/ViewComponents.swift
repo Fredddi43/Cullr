@@ -51,8 +51,7 @@ struct BatchListRowView: View {
       isSelected.toggle()
     }
     .onAppear {
-      // SIMPLIFIED FIX: ONLY use pre-loaded thumbnails from AppState
-      // Don't generate thumbnails in ViewComponents - let AppState handle it
+      // Use pre-loaded thumbnails from AppState
       loadPreloadedThumbnails()
     }
     .onChange(of: appState.folderThumbnails) { _, _ in
@@ -91,7 +90,7 @@ struct BatchListRowView: View {
     let singleHeight = playerPreviewSize * 0.309
 
     ZStack {
-      // CRITICAL FIX: Use static thumbnail by default, only show video player when actually hovered
+      // Static thumbnail by default
       if let thumbnail = clipThumbnails[0] {
         thumbnail
           .resizable()
@@ -107,10 +106,8 @@ struct BatchListRowView: View {
           .cornerRadius(8)
       }
 
-      // PERFORMANCE FIX: Only show video player when this specific row is hovered AND there's no other video playing
-      if isRowHovered && appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL)
-        && appState.hoveredVideoURL == url
-      {
+      // Show video preview when hovering
+      if isRowHovered {
         if playbackType == .speed {
           FolderSpeedPreview(
             url: url,
@@ -144,7 +141,7 @@ struct BatchListRowView: View {
   @ViewBuilder
   private func clipThumbnailView(index: Int, width: CGFloat, height: CGFloat) -> some View {
     ZStack {
-      // CRITICAL FIX: Use static thumbnail by default, only show video player when actually hovered
+      // Static thumbnail by default
       if let thumbnail = clipThumbnails[index] {
         thumbnail
           .resizable()
@@ -160,10 +157,8 @@ struct BatchListRowView: View {
           .cornerRadius(6)
       }
 
-      // PERFORMANCE FIX: Only show video player when this specific row is hovered AND there's no other video playing
-      if isRowHovered && appState.shouldPlayVideo(url, hoveredURL: appState.hoveredVideoURL)
-        && appState.hoveredVideoURL == url
-      {
+      // Show video preview when hovering
+      if isRowHovered {
         if playbackType == .speed {
           FolderSpeedPreview(
             url: url,
@@ -254,20 +249,19 @@ struct BatchListRowView: View {
   }
 
   private func loadPreloadedThumbnails() {
-    // SIMPLIFIED FIX: ONLY use pre-loaded thumbnails from AppState
-    // Don't generate thumbnails in ViewComponents - let AppState handle it
+    // Use pre-loaded thumbnails from AppState
     if let thumbnail = appState.folderThumbnails[url] {
-      // For all clips, use the same thumbnail (since they're from the same video)
+      // Use the same thumbnail for all clips
       for index in 0..<times.count {
         clipThumbnails[index] = thumbnail
       }
-      // Also set for single preview (index 0)
       if times.isEmpty {
         clipThumbnails[0] = thumbnail
       }
     }
-    // If no thumbnail available, just leave it as nil - AppState will populate it eventually
+    // If no thumbnail available, leave as nil - AppState will populate it eventually
   }
+
 }
 
 // MARK: - Filter Controls

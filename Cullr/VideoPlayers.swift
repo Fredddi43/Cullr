@@ -14,9 +14,22 @@ struct BaseVideoPlayerView: NSViewRepresentable {
     let playerLayer = AVPlayerLayer(player: player)
     playerLayer.videoGravity = .resizeAspectFill
     playerLayer.frame = .zero
+
+    // CRITICAL FIX: Prevent overlay error indicators and forbidden signs
+    playerLayer.backgroundColor = CGColor.clear
+    playerLayer.isOpaque = false
+
     view.layer = playerLayer
     view.wantsLayer = true
     playerLayer.needsDisplayOnBoundsChange = true
+
+    // CRITICAL FIX: Ensure proper layer setup to prevent errors
+    view.layer?.masksToBounds = true
+    view.layer?.isOpaque = false
+
+    // CRITICAL FIX: Prevent system error overlays
+    view.allowedTouchTypes = []
+
     return view
   }
 

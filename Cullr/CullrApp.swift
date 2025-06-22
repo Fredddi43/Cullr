@@ -11,6 +11,14 @@ struct Cullr: App {
       ContentView()
         .frame(minWidth: 1700, minHeight: 800)
         .environmentObject(appState)
+        .navigationTitle(windowTitle)
     }
+  }
+
+  private var windowTitle: String {
+    if let folderURL = appState.folderURL {
+      return folderURL.lastPathComponent
+    }
+    return "Cullr"
   }
 }
